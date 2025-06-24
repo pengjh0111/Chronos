@@ -17,6 +17,7 @@ add_onnx_mlir_library(OMMlirDialects
   ConvertONNXToculibs.cpp
   EliminateRedundantPtrConversion.cpp
   UseHandleStreamPool.cpp
+  FP16ThresholdPass.cpp
 
   DEPENDS
   OMKrnlIncGen

@@ -705,7 +705,7 @@ bool shouldMoveWithCuLibs(Operation* op) {
          isa<arith::ConstantOp>(op);  // 常量也可能需要
 }
 
-// multi_gpu_module version
+// // multi_gpu_module version
 // void reorganizeGPUModules(ModuleOp moduleOp, DependencyGraph &graph) {
 //   OpBuilder builder(moduleOp.getContext());
   
