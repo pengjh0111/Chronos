@@ -260,21 +260,21 @@ private:
     Block &entryBlock = func.getBody().front();
     builder.setInsertionPointToStart(&entryBlock);
     
-    // Create constant for pool size (15)
+    // Create constant for pool size (35)
     auto i32Type = IntegerType::get(builder.getContext(), 32);
     auto poolSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(15));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(35));
     
     LLVM_DEBUG(llvm::dbgs() << "Adding pool initialization calls\n");
     
-    // Add mgpuInitStreamPool(15)
+    // Add mgpuInitStreamPool(35)
     builder.create<LLVM::CallOp>(
         func.getLoc(),
         TypeRange{},
         "mgpuInitStreamPool",
         ValueRange{poolSize});
     
-    // Add mgpuInitHandlePool(15)
+    // Add mgpuInitHandlePool(35)
     builder.create<LLVM::CallOp>(
         func.getLoc(),
         TypeRange{},
