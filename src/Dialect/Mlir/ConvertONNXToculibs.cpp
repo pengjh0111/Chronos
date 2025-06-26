@@ -3903,7 +3903,358 @@ public:
 //   }
 // };
 
-// Pattern to convert onnx.Div to a call to mgpuCudnnMulScalar (with reciprocal) fp16
+// // Pattern to convert onnx.Div to a call to mgpuCudnnMulScalar (with reciprocal) fp16
+// class DivOpLowering : public OpRewritePattern<mlir::ONNXDivOp>, public ONNXToCuLibsPatternBase {
+// public:
+//   using OpRewritePattern<mlir::ONNXDivOp>::OpRewritePattern;
+
+//   LogicalResult matchAndRewrite(mlir::ONNXDivOp divOp, PatternRewriter &rewriter) const override {
+//     Location loc = divOp.getLoc();
+//     LLVM_DEBUG(llvm::dbgs() << "Converting onnx.Div at " << loc << "\n");
+
+//     // 获取输入张量
+//     Value inputA = divOp.getA();
+//     Value inputB = divOp.getB();
+    
+//     LLVM_DEBUG(llvm::dbgs() << "Input A: " << inputA << "\n");
+//     LLVM_DEBUG(llvm::dbgs() << "Input A type: " << inputA.getType() << "\n");
+//     LLVM_DEBUG(llvm::dbgs() << "Input B: " << inputB << "\n");
+//     LLVM_DEBUG(llvm::dbgs() << "Input B type: " << inputB.getType() << "\n");
+    
+//     // 获取输入类型 - 修复：同时检查两个输入的类型
+//     auto inputTypeA = mlir::dyn_cast<RankedTensorType>(inputA.getType());
+//     auto inputTypeB = mlir::dyn_cast<RankedTensorType>(inputB.getType());
+    
+//     if (!inputTypeA || !inputTypeA.hasStaticShape()) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input A must have static shape\n");
+//       return rewriter.notifyMatchFailure(divOp, "Input A must have static shape");
+//     }
+    
+//     // 修复：添加对 inputB 类型的检查
+//     if (!inputTypeB || !inputTypeB.hasStaticShape()) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input B must have static shape\n");
+//       return rewriter.notifyMatchFailure(divOp, "Input B must have static shape");
+//     }
+    
+//     // 检查元素类型是否为 FP16
+//     Type elementType = inputTypeA.getElementType();
+//     if (!elementType.isF16()) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Only FP16 element type supported\n");
+//       return rewriter.notifyMatchFailure(divOp, "Only FP16 element type supported");
+//     }
+    
+//     LLVM_DEBUG(llvm::dbgs() << "Element type: FP16\n");
+    
+//     // 检查 inputB 是否为标量
+//     auto inputShapeB = inputTypeB.getShape();
+//     bool isScalar = inputShapeB.empty() || 
+//                    (inputShapeB.size() == 1 && inputShapeB[0] == 1) ||
+//                    (llvm::all_of(inputShapeB, [](int64_t dim) { return dim == 1; }));
+    
+//     if (!isScalar) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Only scalar division is supported\n");
+//       return rewriter.notifyMatchFailure(divOp, "Only scalar division is supported");
+//     }
+    
+//     LLVM_DEBUG(llvm::dbgs() << "Detected scalar division\n");
+    
+//     // 查找 inputB 的定义操作
+//     auto inputBDefOp = inputB.getDefiningOp();
+//     LLVM_DEBUG(llvm::dbgs() << "Input B defining op: " << (inputBDefOp ? inputBDefOp->getName().getStringRef() : "null") << "\n");
+    
+//     if (!inputBDefOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input B has no defining operation\n");
+//       return rewriter.notifyMatchFailure(divOp, "Input B has no defining operation");
+//     }
+    
+//     // 递归查找 krnl.global 操作
+//     std::function<Operation*(Value)> findKrnlGlobal = [&](Value val) -> Operation* {
+//       auto defOp = val.getDefiningOp();
+//       if (!defOp) {
+//         LLVM_DEBUG(llvm::dbgs() << "No defining operation for value\n");
+//         return nullptr;
+//       }
+      
+//       StringRef opName = defOp->getName().getStringRef();
+//       LLVM_DEBUG(llvm::dbgs() << "Checking operation: " << opName << "\n");
+      
+//       if (opName == "krnl.global") {
+//         return defOp;
+//       } else if (opName == "builtin.unrealized_conversion_cast") {
+//         auto castOp = mlir::dyn_cast<UnrealizedConversionCastOp>(defOp);
+//         if (castOp && castOp.getNumOperands() == 1) {
+//           LLVM_DEBUG(llvm::dbgs() << "Following unrealized_conversion_cast\n");
+//           return findKrnlGlobal(castOp.getOperand(0));
+//         }
+//       }
+//       LLVM_DEBUG(llvm::dbgs() << "Operation " << opName << " not recognized\n");
+//       return nullptr;
+//     };
+    
+//     Operation* krnlGlobalOp = findKrnlGlobal(inputB);
+    
+//     if (!krnlGlobalOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input B is not from krnl.global operation\n");
+//       return rewriter.notifyMatchFailure(divOp, "Input B must be from krnl.global operation");
+//     }
+    
+//     LLVM_DEBUG(llvm::dbgs() << "Found krnl.global operation: " << *krnlGlobalOp << "\n");
+    
+//     // 获取 krnl.global 的属性
+//     auto shapeAttr = krnlGlobalOp->getAttr("shape").dyn_cast<ArrayAttr>();
+//     auto valueAttr = krnlGlobalOp->getAttr("value").dyn_cast<DenseElementsAttr>();
+    
+//     if (!shapeAttr || !valueAttr) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: krnl.global missing shape or value attributes\n");
+//       return rewriter.notifyMatchFailure(divOp, "krnl.global must have shape and value attributes");
+//     }
+    
+//     // 检查是否为标量（shape为空）
+//     if (shapeAttr.size() != 0) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Not a scalar constant, shape size = " << shapeAttr.size() << "\n");
+//       return rewriter.notifyMatchFailure(divOp, "Only scalar constants are supported");
+//     }
+    
+//     // 提取标量值 - 直接使用 FP16
+//     if (valueAttr.getNumElements() != 1) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Value is not a single element\n");
+//       return rewriter.notifyMatchFailure(divOp, "Value must be a single element");
+//     }
+    
+//     APFloat scalarValue = *valueAttr.getValues<APFloat>().begin();
+//     LLVM_DEBUG(llvm::dbgs() << "Extracted F16 scalar value: " << scalarValue.convertToFloat() << "\n");
+    
+//     // 检查除零错误
+//     if (scalarValue.isZero()) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Division by zero\n");
+//       return rewriter.notifyMatchFailure(divOp, "Division by zero");
+//     }
+    
+//     // 计算倒数 - 在 FP16 精度下
+//     APFloat reciprocalValue = APFloat::getOne(APFloat::IEEEhalf());
+//     auto divResult = reciprocalValue.divide(scalarValue, APFloat::rmNearestTiesToEven);
+//     if (divResult != APFloat::opOK) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Division operation failed\n");
+//       return rewriter.notifyMatchFailure(divOp, "Reciprocal calculation failed");
+//     }
+    
+//     LLVM_DEBUG(llvm::dbgs() << "Calculated reciprocal: " << reciprocalValue.convertToFloat() << "\n");
+    
+//     // 检查输入A的维度
+//     auto inputShapeA = inputTypeA.getShape();
+//     LLVM_DEBUG(llvm::dbgs() << "Input A shape dimensions: " << inputShapeA.size() << "\n");
+    
+//     if (inputShapeA.size() < 1 || inputShapeA.size() > 4) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input A dimensions must be 1D to 4D\n");
+//       return rewriter.notifyMatchFailure(divOp, "Input A must be 1D to 4D tensor");
+//     }
+    
+//     // 填充形状到4D (NCHW)
+//     std::vector<int64_t> paddedShapeA(4, 1);
+//     int offset = 4 - inputShapeA.size();
+//     for (size_t i = 0; i < inputShapeA.size(); ++i) {
+//       paddedShapeA[i + offset] = inputShapeA[i];
+//     }
+    
+//     int64_t n = paddedShapeA[0];
+//     int64_t c = paddedShapeA[1];
+//     int64_t h = paddedShapeA[2];
+//     int64_t w = paddedShapeA[3];
+    
+//     LLVM_DEBUG(llvm::dbgs() << "Padded dimensions: [" << n << "," << c << "," << h << "," << w << "]\n");
+    
+//     // 创建整数参数常量
+//     auto i32Type = rewriter.getI32Type();
+//     auto createI32Const = [&](int64_t value) -> Value {
+//       return rewriter.create<arith::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(value));
+//     };
+    
+//     auto nValue = createI32Const(n);
+//     auto cValue = createI32Const(c);
+//     auto hValue = createI32Const(h);
+//     auto wValue = createI32Const(w);
+    
+//     // 使用 memref.global 创建倒数常量 - 修改：使用 FP16 类型
+//     auto f16Type = rewriter.getF16Type();
+//     auto moduleOp = divOp->getParentOfType<ModuleOp>();
+    
+//     // 生成唯一的全局变量名
+//     std::string globalName = "reciprocal_" + std::to_string(std::hash<float>{}(reciprocalValue.convertToFloat())) + "_fp16";
+//     auto nameAttr = rewriter.getStringAttr(globalName);
+    
+//     // 检查是否已经存在相同的全局变量
+//     memref::GlobalOp existingGlobal = moduleOp.lookupSymbol<memref::GlobalOp>(globalName);
+//     memref::GlobalOp reciprocalGlobalOp;
+    
+//     if (!existingGlobal) {
+//       // 创建标量 memref 类型
+//       auto scalarMemrefType = MemRefType::get({}, f16Type);
+      
+//       // 创建标量张量类型和 DenseElementsAttr (memref.global 需要 DenseElementsAttr)
+//       auto scalarTensorType = RankedTensorType::get({}, f16Type);
+//       auto reciprocalAttr = DenseElementsAttr::get(scalarTensorType, reciprocalValue);
+      
+//       // 在模块开始处创建 memref.global
+//       OpBuilder::InsertionGuard guard(rewriter);
+//       rewriter.setInsertionPointToStart(moduleOp.getBody());
+      
+//       reciprocalGlobalOp = rewriter.create<memref::GlobalOp>(
+//           loc,
+//           nameAttr,                    // sym_name
+//           rewriter.getStringAttr("private"), // sym_visibility  
+//           scalarMemrefType,            // type
+//           reciprocalAttr,              // initial_value (must be DenseElementsAttr)
+//           /*constant=*/true,           // constant
+//           /*alignment=*/nullptr        // alignment
+//       );
+      
+//       LLVM_DEBUG(llvm::dbgs() << "Created memref.global for reciprocal: " << *reciprocalGlobalOp << "\n");
+//     } else {
+//       reciprocalGlobalOp = existingGlobal;
+//       LLVM_DEBUG(llvm::dbgs() << "Reusing existing memref.global for reciprocal\n");
+//     }
+    
+//     // 获取全局变量的引用 - 修改：插入到当前函数的最开始位置
+//     auto scalarMemrefType = MemRefType::get({}, f16Type);
+//     Value reciprocalRef;
+//     {
+//       // 获取当前函数
+//       auto funcOp = divOp->getParentOfType<func::FuncOp>();
+      
+//       // 临时改变插入位置到函数开始
+//       OpBuilder::InsertionGuard guard(rewriter);
+//       rewriter.setInsertionPointToStart(&funcOp.getBody().front());
+      
+//       reciprocalRef = rewriter.create<memref::GetGlobalOp>(
+//           loc, scalarMemrefType, reciprocalGlobalOp.getSymName());
+      
+//       LLVM_DEBUG(llvm::dbgs() << "Created memref.get_global at function start\n");
+//     }
+    
+//     // 标记输入为缓冲区化
+//     auto markForBufferization = [&](Value tensor) -> Value {
+//       auto tensorType = tensor.getType().cast<RankedTensorType>();
+//       auto memrefType = MemRefType::get(
+//         tensorType.getShape(),
+//         tensorType.getElementType());
+//       return rewriter.create<UnrealizedConversionCastOp>(
+//         loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
+//     };
+    
+//     auto inputMemrefA = markForBufferization(inputA);
+    
+//     // 转换 memrefs 为 void pointers
+//     auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    
+//     auto getPtr = [&](Value memref) -> Value {
+//       auto indexType = rewriter.getIndexType();
+//       auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(loc, indexType, memref);
+//       auto i64Type = rewriter.getIntegerType(64);
+//       auto ptrI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, ptrIndex);
+//       return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrI64);
+//     };
+    
+//     auto inputPtrA = getPtr(inputMemrefA);
+//     auto reciprocalPtr = getPtr(reciprocalRef);
+    
+//     // 分配输出 memref
+//     auto outputType = mlir::dyn_cast<RankedTensorType>(divOp.getResult().getType());
+//     auto outputMemrefType = MemRefType::get(outputType.getShape(), outputType.getElementType());
+//     auto outputMemref = rewriter.create<memref::AllocOp>(loc, outputMemrefType);
+//     auto outputPtr = getPtr(outputMemref);
+    
+//     // 创建CUDA流
+//     func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
+//     if (!streamCreateFunc) {
+//       OpBuilder::InsertionGuard guard(rewriter);
+//       rewriter.setInsertionPointToStart(moduleOp.getBody());
+//       auto streamCreateType = rewriter.getFunctionType({}, {ptrType});
+//       streamCreateFunc = rewriter.create<func::FuncOp>(
+//         loc, "mgpuStreamCreate", streamCreateType);
+//       streamCreateFunc.setPrivate();
+//     }
+
+//     func::FuncOp handleCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCreateHandlesForStream");
+//     if (!handleCreateFunc) {
+//       OpBuilder::InsertionGuard guard(rewriter);
+//       rewriter.setInsertionPointToStart(moduleOp.getBody());
+//       auto handleCreateType = rewriter.getFunctionType({ptrType}, {});
+//       handleCreateFunc = rewriter.create<func::FuncOp>(
+//         loc, "mgpuCreateHandlesForStream", handleCreateType);
+//       handleCreateFunc.setPrivate();
+//     }
+    
+//     auto streamCallOp = rewriter.create<func::CallOp>(
+//       loc, TypeRange{ptrType}, streamCreateFunc.getName(), ValueRange{});
+//     auto streamPtr = streamCallOp.getResult(0);
+    
+//     rewriter.create<func::CallOp>(
+//       loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
+
+//     // 使用标量乘法函数（用倒数实现除法）
+//     func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>("mgpuCudnnMulScalar");
+//     if (!funcOp) {
+//       OpBuilder::InsertionGuard guard(rewriter);
+//       rewriter.setInsertionPointToStart(moduleOp.getBody());
+//       auto funcType = rewriter.getFunctionType({
+//         ptrType, ptrType, ptrType,  // input, scalar, output
+//         i32Type, i32Type, i32Type, i32Type,  // n, c, h, w
+//         ptrType  // stream
+//       }, {});
+//       funcOp = rewriter.create<func::FuncOp>(
+//         loc, "mgpuCudnnMulScalar", funcType);
+//       funcOp.setPrivate();
+//     }
+    
+//     // 调用函数 (inputA * reciprocal)
+//     std::vector<Value> args = {
+//       inputPtrA, reciprocalPtr, outputPtr,
+//       nValue, cValue, hValue, wValue,
+//       streamPtr
+//     };
+    
+//     rewriter.create<func::CallOp>(
+//       loc, TypeRange(), funcOp.getName(), ValueRange(args));
+    
+//     // 同步并销毁流
+//     func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
+//     if (!streamSyncFunc) {
+//       OpBuilder::InsertionGuard guard(rewriter);
+//       rewriter.setInsertionPointToStart(moduleOp.getBody());
+//       auto streamSyncType = rewriter.getFunctionType({ptrType}, {});
+//       streamSyncFunc = rewriter.create<func::FuncOp>(
+//         loc, "mgpuStreamSynchronize", streamSyncType);
+//       streamSyncFunc.setPrivate();
+//     }
+    
+//     rewriter.create<func::CallOp>(
+//       loc, TypeRange(), streamSyncFunc.getName(), ValueRange{streamPtr});
+    
+//     func::FuncOp streamDestroyFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamDestroy");
+//     if (!streamDestroyFunc) {
+//       OpBuilder::InsertionGuard guard(rewriter);
+//       rewriter.setInsertionPointToStart(moduleOp.getBody());
+//       auto streamDestroyType = rewriter.getFunctionType({ptrType}, {});
+//       streamDestroyFunc = rewriter.create<func::FuncOp>(
+//         loc, "mgpuStreamDestroy", streamDestroyType);
+//       streamDestroyFunc.setPrivate();
+//     }
+    
+//     rewriter.create<func::CallOp>(
+//       loc, TypeRange(), streamDestroyFunc.getName(), ValueRange{streamPtr});
+    
+//     // 将 memref 转换回 tensor
+//     auto resultTensor = rewriter.create<UnrealizedConversionCastOp>(
+//         loc, TypeRange{outputType}, ValueRange{outputMemref}).getResult(0);
+    
+//     rewriter.replaceOp(divOp, resultTensor);
+    
+//     LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.Div to cuDNN MulScalar call\n");
+//     return success();
+//   }
+// };
+
+// Pattern to convert onnx.Div to a call to mgpuCudnnMulScalar (with reciprocal) for both fp32 and fp16
 class DivOpLowering : public OpRewritePattern<mlir::ONNXDivOp>, public ONNXToCuLibsPatternBase {
 public:
   using OpRewritePattern<mlir::ONNXDivOp>::OpRewritePattern;
@@ -3936,14 +4287,17 @@ public:
       return rewriter.notifyMatchFailure(divOp, "Input B must have static shape");
     }
     
-    // 检查元素类型是否为 FP16
+    // 检查元素类型是否为 FP32 或 FP16
     Type elementType = inputTypeA.getElementType();
-    if (!elementType.isF16()) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Only FP16 element type supported\n");
-      return rewriter.notifyMatchFailure(divOp, "Only FP16 element type supported");
+    bool isFP32 = elementType.isF32();
+    bool isFP16 = elementType.isF16();
+    
+    if (!isFP32 && !isFP16) {
+      LLVM_DEBUG(llvm::dbgs() << "Failed: Only FP32 and FP16 element types supported\n");
+      return rewriter.notifyMatchFailure(divOp, "Only FP32 and FP16 element types supported");
     }
     
-    LLVM_DEBUG(llvm::dbgs() << "Element type: FP16\n");
+    LLVM_DEBUG(llvm::dbgs() << "Element type: " << (isFP32 ? "FP32" : "FP16") << "\n");
     
     // 检查 inputB 是否为标量
     auto inputShapeB = inputTypeB.getShape();
@@ -3958,87 +4312,135 @@ public:
     
     LLVM_DEBUG(llvm::dbgs() << "Detected scalar division\n");
     
-    // 查找 inputB 的定义操作
+    // 查找 inputB 的定义操作并提取标量值
     auto inputBDefOp = inputB.getDefiningOp();
     LLVM_DEBUG(llvm::dbgs() << "Input B defining op: " << (inputBDefOp ? inputBDefOp->getName().getStringRef() : "null") << "\n");
     
-    if (!inputBDefOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Input B has no defining operation\n");
-      return rewriter.notifyMatchFailure(divOp, "Input B has no defining operation");
-    }
+    APFloat scalarValue(APFloat::IEEEsingle());
+    bool foundScalarValue = false;
     
-    // 递归查找 krnl.global 操作
-    std::function<Operation*(Value)> findKrnlGlobal = [&](Value val) -> Operation* {
-      auto defOp = val.getDefiningOp();
-      if (!defOp) {
-        LLVM_DEBUG(llvm::dbgs() << "No defining operation for value\n");
-        return nullptr;
-      }
+    // 尝试多种方式提取标量值
+    if (inputBDefOp) {
+      StringRef opName = inputBDefOp->getName().getStringRef();
+      LLVM_DEBUG(llvm::dbgs() << "Input B defining operation: " << opName << "\n");
       
-      StringRef opName = defOp->getName().getStringRef();
-      LLVM_DEBUG(llvm::dbgs() << "Checking operation: " << opName << "\n");
-      
-      if (opName == "krnl.global") {
-        return defOp;
-      } else if (opName == "builtin.unrealized_conversion_cast") {
-        auto castOp = mlir::dyn_cast<UnrealizedConversionCastOp>(defOp);
-        if (castOp && castOp.getNumOperands() == 1) {
-          LLVM_DEBUG(llvm::dbgs() << "Following unrealized_conversion_cast\n");
-          return findKrnlGlobal(castOp.getOperand(0));
+      // 方法1: 直接从 onnx.Constant 提取
+      if (auto constOp = mlir::dyn_cast<mlir::ONNXConstantOp>(inputBDefOp)) {
+        auto valueOpt = constOp.getValue();
+        if (valueOpt.has_value()) {
+          if (auto valueAttr = valueOpt.value().dyn_cast<DenseElementsAttr>()) {
+            if (valueAttr.getNumElements() == 1) {
+              if (isFP32) {
+                auto values = valueAttr.getValues<float>();
+                float floatValue = *values.begin();
+                scalarValue = APFloat(floatValue);
+                foundScalarValue = true;
+                LLVM_DEBUG(llvm::dbgs() << "Extracted FP32 value from onnx.Constant: " << floatValue << "\n");
+              } else if (isFP16) {
+                auto values = valueAttr.getValues<APFloat>();
+                APFloat fp16Value = *values.begin();
+                scalarValue = fp16Value;
+                foundScalarValue = true;
+                LLVM_DEBUG(llvm::dbgs() << "Extracted FP16 value from onnx.Constant: " << fp16Value.convertToFloat() << "\n");
+              }
+            }
+          }
         }
       }
-      LLVM_DEBUG(llvm::dbgs() << "Operation " << opName << " not recognized\n");
-      return nullptr;
-    };
-    
-    Operation* krnlGlobalOp = findKrnlGlobal(inputB);
-    
-    if (!krnlGlobalOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Input B is not from krnl.global operation\n");
-      return rewriter.notifyMatchFailure(divOp, "Input B must be from krnl.global operation");
+      
+      // 方法2: 递归查找 krnl.global 操作
+      if (!foundScalarValue) {
+        std::function<Operation*(Value)> findKrnlGlobal = [&](Value val) -> Operation* {
+          auto defOp = val.getDefiningOp();
+          if (!defOp) {
+            LLVM_DEBUG(llvm::dbgs() << "No defining operation for value\n");
+            return nullptr;
+          }
+          
+          StringRef opName = defOp->getName().getStringRef();
+          LLVM_DEBUG(llvm::dbgs() << "Checking operation: " << opName << "\n");
+          
+          if (opName == "krnl.global") {
+            return defOp;
+          } else if (opName == "builtin.unrealized_conversion_cast") {
+            auto castOp = mlir::dyn_cast<UnrealizedConversionCastOp>(defOp);
+            if (castOp && castOp.getNumOperands() == 1) {
+              LLVM_DEBUG(llvm::dbgs() << "Following unrealized_conversion_cast\n");
+              return findKrnlGlobal(castOp.getOperand(0));
+            }
+          }
+          LLVM_DEBUG(llvm::dbgs() << "Operation " << opName << " not recognized\n");
+          return nullptr;
+        };
+        
+        Operation* krnlGlobalOp = findKrnlGlobal(inputB);
+        
+        if (krnlGlobalOp) {
+          LLVM_DEBUG(llvm::dbgs() << "Found krnl.global operation: " << *krnlGlobalOp << "\n");
+          
+          // 获取 krnl.global 的属性
+          auto shapeAttr = krnlGlobalOp->getAttr("shape").dyn_cast<ArrayAttr>();
+          auto valueAttr = krnlGlobalOp->getAttr("value").dyn_cast<DenseElementsAttr>();
+          
+          if (shapeAttr && valueAttr && shapeAttr.size() == 0 && valueAttr.getNumElements() == 1) {
+            if (isFP32) {
+              auto values = valueAttr.getValues<float>();
+              float floatValue = *values.begin();
+              scalarValue = APFloat(floatValue);
+              foundScalarValue = true;
+              LLVM_DEBUG(llvm::dbgs() << "Extracted FP32 value from krnl.global: " << floatValue << "\n");
+            } else if (isFP16) {
+              auto values = valueAttr.getValues<APFloat>();
+              APFloat fp16Value = *values.begin();
+              scalarValue = fp16Value;
+              foundScalarValue = true;
+              LLVM_DEBUG(llvm::dbgs() << "Extracted FP16 value from krnl.global: " << fp16Value.convertToFloat() << "\n");
+            }
+          }
+        }
+      }
+      
+      // 方法3: 尝试从 arith.constant 提取
+      if (!foundScalarValue) {
+        if (auto arithConstOp = mlir::dyn_cast<arith::ConstantOp>(inputBDefOp)) {
+          if (auto floatAttr = arithConstOp.getValue().dyn_cast<FloatAttr>()) {
+            scalarValue = floatAttr.getValue();
+            foundScalarValue = true;
+            LLVM_DEBUG(llvm::dbgs() << "Extracted value from arith.constant: " << scalarValue.convertToFloat() << "\n");
+          }
+        }
+      }
     }
     
-    LLVM_DEBUG(llvm::dbgs() << "Found krnl.global operation: " << *krnlGlobalOp << "\n");
-    
-    // 获取 krnl.global 的属性
-    auto shapeAttr = krnlGlobalOp->getAttr("shape").dyn_cast<ArrayAttr>();
-    auto valueAttr = krnlGlobalOp->getAttr("value").dyn_cast<DenseElementsAttr>();
-    
-    if (!shapeAttr || !valueAttr) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: krnl.global missing shape or value attributes\n");
-      return rewriter.notifyMatchFailure(divOp, "krnl.global must have shape and value attributes");
+    if (!foundScalarValue) {
+      LLVM_DEBUG(llvm::dbgs() << "Failed: Could not extract scalar value from Input B\n");
+      return rewriter.notifyMatchFailure(divOp, "Could not extract scalar value from Input B");
     }
     
-    // 检查是否为标量（shape为空）
-    if (shapeAttr.size() != 0) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Not a scalar constant, shape size = " << shapeAttr.size() << "\n");
-      return rewriter.notifyMatchFailure(divOp, "Only scalar constants are supported");
-    }
-    
-    // 提取标量值 - 直接使用 FP16
-    if (valueAttr.getNumElements() != 1) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Value is not a single element\n");
-      return rewriter.notifyMatchFailure(divOp, "Value must be a single element");
-    }
-    
-    APFloat scalarValue = *valueAttr.getValues<APFloat>().begin();
-    LLVM_DEBUG(llvm::dbgs() << "Extracted F16 scalar value: " << scalarValue.convertToFloat() << "\n");
-    
-    // 检查除零错误
+    // 检查除零错误并计算倒数
     if (scalarValue.isZero()) {
       LLVM_DEBUG(llvm::dbgs() << "Failed: Division by zero\n");
       return rewriter.notifyMatchFailure(divOp, "Division by zero");
     }
     
-    // 计算倒数 - 在 FP16 精度下
-    APFloat reciprocalValue = APFloat::getOne(APFloat::IEEEhalf());
-    auto divResult = reciprocalValue.divide(scalarValue, APFloat::rmNearestTiesToEven);
-    if (divResult != APFloat::opOK) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Division operation failed\n");
-      return rewriter.notifyMatchFailure(divOp, "Reciprocal calculation failed");
-    }
+    APFloat reciprocalValue(APFloat::IEEEsingle());
     
-    LLVM_DEBUG(llvm::dbgs() << "Calculated reciprocal: " << reciprocalValue.convertToFloat() << "\n");
+    if (isFP32) {
+      // FP32 处理 - 计算倒数
+      float floatValue = scalarValue.convertToFloat();
+      float reciprocalFloat = 1.0f / floatValue;
+      reciprocalValue = APFloat(reciprocalFloat);
+      LLVM_DEBUG(llvm::dbgs() << "Calculated FP32 reciprocal: " << reciprocalFloat << "\n");
+    } else {
+      // FP16 处理 - 在 FP16 精度下计算倒数
+      reciprocalValue = APFloat::getOne(APFloat::IEEEhalf());
+      auto divResult = reciprocalValue.divide(scalarValue, APFloat::rmNearestTiesToEven);
+      if (divResult != APFloat::opOK) {
+        LLVM_DEBUG(llvm::dbgs() << "Failed: Division operation failed\n");
+        return rewriter.notifyMatchFailure(divOp, "Reciprocal calculation failed");
+      }
+      LLVM_DEBUG(llvm::dbgs() << "Calculated FP16 reciprocal: " << reciprocalValue.convertToFloat() << "\n");
+    }
     
     // 检查输入A的维度
     auto inputShapeA = inputTypeA.getShape();
@@ -4074,12 +4476,14 @@ public:
     auto hValue = createI32Const(h);
     auto wValue = createI32Const(w);
     
-    // 使用 memref.global 创建倒数常量 - 修改：使用 FP16 类型
-    auto f16Type = rewriter.getF16Type();
+    // 使用 memref.global 创建倒数常量 - 根据类型选择
+    Type scalarType = isFP32 ? rewriter.getF32Type() : rewriter.getF16Type();
     auto moduleOp = divOp->getParentOfType<ModuleOp>();
     
     // 生成唯一的全局变量名
-    std::string globalName = "reciprocal_" + std::to_string(std::hash<float>{}(reciprocalValue.convertToFloat())) + "_fp16";
+    std::string globalName = "reciprocal_" + 
+                            std::to_string(std::hash<float>{}(reciprocalValue.convertToFloat())) + 
+                            (isFP32 ? "_fp32" : "_fp16");
     auto nameAttr = rewriter.getStringAttr(globalName);
     
     // 检查是否已经存在相同的全局变量
@@ -4088,11 +4492,17 @@ public:
     
     if (!existingGlobal) {
       // 创建标量 memref 类型
-      auto scalarMemrefType = MemRefType::get({}, f16Type);
+      auto scalarMemrefType = MemRefType::get({}, scalarType);
       
       // 创建标量张量类型和 DenseElementsAttr (memref.global 需要 DenseElementsAttr)
-      auto scalarTensorType = RankedTensorType::get({}, f16Type);
-      auto reciprocalAttr = DenseElementsAttr::get(scalarTensorType, reciprocalValue);
+      auto scalarTensorType = RankedTensorType::get({}, scalarType);
+      DenseElementsAttr reciprocalAttr;
+      
+      if (isFP32) {
+        reciprocalAttr = DenseElementsAttr::get(scalarTensorType, reciprocalValue.convertToFloat());
+      } else {
+        reciprocalAttr = DenseElementsAttr::get(scalarTensorType, reciprocalValue);
+      }
       
       // 在模块开始处创建 memref.global
       OpBuilder::InsertionGuard guard(rewriter);
@@ -4115,7 +4525,7 @@ public:
     }
     
     // 获取全局变量的引用 - 修改：插入到当前函数的最开始位置
-    auto scalarMemrefType = MemRefType::get({}, f16Type);
+    auto scalarMemrefType = MemRefType::get({}, scalarType);
     Value reciprocalRef;
     {
       // 获取当前函数
@@ -4249,7 +4659,8 @@ public:
     
     rewriter.replaceOp(divOp, resultTensor);
     
-    LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.Div to cuDNN MulScalar call\n");
+    LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.Div to cuDNN MulScalar call (" 
+               << (isFP32 ? "FP32" : "FP16") << ")\n");
     return success();
   }
 };
