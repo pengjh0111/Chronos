@@ -71,6 +71,11 @@ void reorganizeIR(func::FuncOp funcOp, DependencyGraph &graph);
 void reorganizeGPUModules(ModuleOp moduleOp, DependencyGraph &graph);
 
 // Helper functions for processing different node types
+func::FuncOp ensureDescriptorReturnFuncDecl(mlir::ModuleOp moduleOp, mlir::OpBuilder& builder);
+
+void insertDescriptorReturnCall(mlir::OpBuilder& builder, mlir::Location loc, 
+                               func::FuncOp descriptorReturnFunc);
+
 Value processKernelNode(DependencyNode* node, OpBuilder& builder, IRMapping& mapper, 
                        Value waitToken, llvm::DenseSet<Operation*>& processedOps);
 
