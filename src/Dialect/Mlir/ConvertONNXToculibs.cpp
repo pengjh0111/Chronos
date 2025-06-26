@@ -120,7 +120,19 @@ void ensureHandlePoolInitialization(ModuleOp moduleOp, PatternRewriter &rewriter
   }
 };
 
-// Pattern to convert onnx.Conv to a call to mgpuCudnnConv2dForward
+// 通用辅助函数：根据元素类型获取函数名后缀
+std::string getFunctionSuffix(Type elementType) {
+  if (elementType.isF16()) {
+    return "_fp16";
+  } else if (elementType.isF32()) {
+    return "";
+  } else {
+    // 其他类型保持原函数名
+    return "";
+  }
+}
+
+// Pattern to convert onnx.Conv to a call to mgpuCudnnConv2dForward[_fp16]
 class ConvOpLowering : public OpRewritePattern<mlir::ONNXConvOp>, public ONNXToCuLibsPatternBase {
 public:
   using OpRewritePattern<mlir::ONNXConvOp>::OpRewritePattern;
@@ -140,6 +152,13 @@ public:
     if (!inputType || !inputType.hasStaticShape()) {
       return rewriter.notifyMatchFailure(convOp, "Input must have static shape");
     }
+    
+    // 获取元素类型并确定函数名后缀
+    Type elementType = inputType.getElementType();
+    std::string functionSuffix = getFunctionSuffix(elementType);
+    std::string functionName = "mgpuCudnnConv2dForward" + functionSuffix;
+    
+    LLVM_DEBUG(llvm::dbgs() << "Using function: " << functionName << " for element type: " << elementType << "\n");
     
     // Get the weight type
     auto weightType = mlir::dyn_cast<RankedTensorType>(weights.getType());
@@ -248,14 +267,6 @@ public:
     // Convert memrefs to void pointers
     auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
     
-    // auto getPtr = [&](Value memref) -> Value {
-    //   // Extract the aligned pointer as index
-    //   auto indexType = rewriter.getIndexType();
-    //   auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(loc, indexType, memref);
-    //   // Convert index to pointer
-    //   return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrIndex);
-    // };
-
     auto getPtr = [&](Value memref) -> Value {
         // Extract the aligned pointer as index
         auto indexType = rewriter.getIndexType();
@@ -284,9 +295,6 @@ public:
     
     // Create a null CUDA stream (or get from context if available)
   auto moduleOp = convOp->getParentOfType<ModuleOp>();
-  // auto currentFunc = convOp->getParentOfType<func::FuncOp>();
-
-  // ensureHandlePoolInitialization(moduleOp, rewriter, loc, ptrType, currentFunc);
 
   func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
   
@@ -319,10 +327,10 @@ public:
   rewriter.create<func::CallOp>(
     loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
   
-  func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>("mgpuCudnnConv2dForward");
+  func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>(functionName);
   
   if (!funcOp) {
-    LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCudnnConv2dForward declaration\n");
+    LLVM_DEBUG(llvm::dbgs() << "Creating " << functionName << " declaration\n");
     OpBuilder::InsertionGuard guard(rewriter);
     rewriter.setInsertionPointToStart(moduleOp.getBody());
     
@@ -338,7 +346,7 @@ public:
     }, {});
     
     funcOp = rewriter.create<func::FuncOp>(
-      loc, "mgpuCudnnConv2dForward", funcType);
+      loc, functionName, funcType);
     funcOp.setPrivate();
   }
   
@@ -395,7 +403,7 @@ public:
 }
 };
 
-// Pattern to convert onnx.Add to a call to mgpuCudnnAdd
+// Pattern to convert onnx.Add to a call to mgpuCudnnAdd[_fp16]
 class AddOpLowering : public OpRewritePattern<mlir::ONNXAddOp>, public ONNXToCuLibsPatternBase {
 public:
   using OpRewritePattern<mlir::ONNXAddOp>::OpRewritePattern;
@@ -417,6 +425,10 @@ public:
       return rewriter.notifyMatchFailure(addOp, "Inputs must have static shapes");
     }
     
+    // 获取元素类型并确定函数名后缀
+    Type elementType = inputTypeA.getElementType();
+    std::string functionSuffix = getFunctionSuffix(elementType);
+    
     // 检查是否为标量操作 (inputB 是标量)
     bool isScalarOperation = false;
     auto inputShapeB = inputTypeB.getShape();
@@ -428,6 +440,12 @@ public:
       isScalarOperation = true;
       LLVM_DEBUG(llvm::dbgs() << "Detected scalar addition\n");
     }
+    
+    // 根据操作类型确定函数名
+    std::string baseFunctionName = isScalarOperation ? "mgpuCudnnAddScalar" : "mgpuCudnnAdd";
+    std::string functionName = baseFunctionName + functionSuffix;
+    
+    LLVM_DEBUG(llvm::dbgs() << "Using function: " << functionName << " for element type: " << elementType << "\n");
     
     // 提取输入维度
     auto inputShapeA = inputTypeA.getShape();
@@ -496,9 +514,6 @@ public:
     
     // 创建 CUDA 流
     auto moduleOp = addOp->getParentOfType<ModuleOp>();
-    // auto currentFunc = addOp->getParentOfType<func::FuncOp>();
-
-    // ensureHandlePoolInitialization(moduleOp, rewriter, loc, ptrType, currentFunc);
 
     func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
     
@@ -531,47 +546,23 @@ public:
     rewriter.create<func::CallOp>(
       loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
 
-    // 根据是否为标量操作选择合适的函数
-    func::FuncOp funcOp;
+    // 查找或创建函数
+    func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>(functionName);
     
-    if (isScalarOperation) {
-      // 使用标量加法函数
-      funcOp = moduleOp.lookupSymbol<func::FuncOp>("mgpuCudnnAddScalar");
+    if (!funcOp) {
+      LLVM_DEBUG(llvm::dbgs() << "Creating " << functionName << " declaration\n");
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
       
-      if (!funcOp) {
-        LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCudnnAddScalar declaration\n");
-        OpBuilder::InsertionGuard guard(rewriter);
-        rewriter.setInsertionPointToStart(moduleOp.getBody());
-        
-        auto funcType = rewriter.getFunctionType({
-          ptrType, ptrType, ptrType,  // input, scalar, output
-          i32Type, i32Type, i32Type, i32Type,  // n, c, h, w
-          ptrType  // stream
-        }, {});
-        
-        funcOp = rewriter.create<func::FuncOp>(
-          loc, "mgpuCudnnAddScalar", funcType);
-        funcOp.setPrivate();
-      }
-    } else {
-      // 使用普通张量加法函数
-      funcOp = moduleOp.lookupSymbol<func::FuncOp>("mgpuCudnnAdd");
+      auto funcType = rewriter.getFunctionType({
+        ptrType, ptrType, ptrType,  // input, scalar/inputB, output
+        i32Type, i32Type, i32Type, i32Type,  // n, c, h, w
+        ptrType  // stream
+      }, {});
       
-      if (!funcOp) {
-        LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCudnnAdd declaration\n");
-        OpBuilder::InsertionGuard guard(rewriter);
-        rewriter.setInsertionPointToStart(moduleOp.getBody());
-        
-        auto funcType = rewriter.getFunctionType({
-          ptrType, ptrType, ptrType,  // inputA, inputB, output
-          i32Type, i32Type, i32Type, i32Type,  // n, c, h, w
-          ptrType  // stream
-        }, {});
-        
-        funcOp = rewriter.create<func::FuncOp>(
-          loc, "mgpuCudnnAdd", funcType);
-        funcOp.setPrivate();
-      }
+      funcOp = rewriter.create<func::FuncOp>(
+        loc, functionName, funcType);
+      funcOp.setPrivate();
     }
     
     // 调用函数
@@ -627,180 +618,10 @@ public:
 
 };
 
-// Pattern to convert onnx.Sub to a call to mgpuCudnnSub
+// Pattern to convert onnx.Sub to a call to mgpuCudnnSub[_fp16]
 class SubOpLowering : public OpRewritePattern<mlir::ONNXSubOp>, public ONNXToCuLibsPatternBase {
 public:
   using OpRewritePattern<mlir::ONNXSubOp>::OpRewritePattern;
-
-  // LogicalResult matchAndRewrite(mlir::ONNXSubOp subOp, PatternRewriter &rewriter) const override {
-  //   // Get the location for error reporting
-  //   Location loc = subOp.getLoc();
-  //   LLVM_DEBUG(llvm::dbgs() << "Converting onnx.Sub at " << loc << "\n");
-
-  //   // Get the input tensors
-  //   Value inputA = subOp.getA();
-  //   Value inputB = subOp.getB();
-    
-  //   // Get the input types
-  //   auto inputTypeA = mlir::dyn_cast<RankedTensorType>(inputA.getType());
-  //   auto inputTypeB = mlir::dyn_cast<RankedTensorType>(inputB.getType());
-    
-  //   if (!inputTypeA || !inputTypeA.hasStaticShape() || !inputTypeB || !inputTypeB.hasStaticShape()) {
-  //     return rewriter.notifyMatchFailure(subOp, "Inputs must have static shapes");
-  //   }
-    
-  //   // Extract input dimensions
-  //   auto inputShapeA = inputTypeA.getShape();
-  //   if (inputShapeA.size() < 1 || inputShapeA.size() > 4) {
-  //     return rewriter.notifyMatchFailure(subOp, "Input must be 1D to 4D tensor");
-  //   }
-    
-  //   // Pad shape to 4D (NCHW) if needed
-  //   std::vector<int64_t> paddedShapeA(4, 1);
-  //   int offset = 4 - inputShapeA.size();
-  //   for (size_t i = 0; i < inputShapeA.size(); ++i) {
-  //     paddedShapeA[i + offset] = inputShapeA[i];
-  //   }
-    
-  //   int64_t n = paddedShapeA[0];
-  //   int64_t c = paddedShapeA[1];
-  //   int64_t h = paddedShapeA[2];
-  //   int64_t w = paddedShapeA[3];
-    
-  //   // Create constants for integer parameters
-  //   auto i32Type = rewriter.getI32Type();
-  //   auto createI32Const = [&](int64_t value) -> Value {
-  //     return rewriter.create<arith::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(value));
-  //   };
-    
-  //   auto nValue = createI32Const(n);
-  //   auto cValue = createI32Const(c);
-  //   auto hValue = createI32Const(h);
-  //   auto wValue = createI32Const(w);
-    
-  //   // Prepare input and output buffers
-  //   auto markForBufferization = [&](Value tensor) -> Value {
-  //     auto tensorType = tensor.getType().cast<RankedTensorType>();
-  //     auto memrefType = MemRefType::get(
-  //       tensorType.getShape(),
-  //       tensorType.getElementType());
-  //     return rewriter.create<UnrealizedConversionCastOp>(
-  //       loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
-  //   };
-    
-  //   auto inputMemrefA = markForBufferization(inputA);
-  //   auto inputMemrefB = markForBufferization(inputB);
-    
-  //   // Convert memrefs to void pointers
-  //   auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-    
-  //   auto getPtr = [&](Value memref) -> Value {
-  //     // Extract the aligned pointer as index
-  //     auto indexType = rewriter.getIndexType();
-  //     auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(loc, indexType, memref);
-      
-  //     auto i64Type = rewriter.getIntegerType(64);
-  //     auto ptrI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, ptrIndex);
-      
-  //     return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrI64);
-  //   };
-    
-  //   auto inputPtrA = getPtr(inputMemrefA);
-  //   auto inputPtrB = getPtr(inputMemrefB);
-    
-  //   // Allocate output memref
-  //   auto outputType = mlir::dyn_cast<RankedTensorType>(subOp.getResult().getType());
-  //   auto outputMemrefType = MemRefType::get(outputType.getShape(), outputType.getElementType());
-  //   auto outputMemref = rewriter.create<memref::AllocOp>(loc, outputMemrefType);
-  //   auto outputPtr = getPtr(outputMemref);
-    
-  //   // Create a CUDA stream
-  //   auto moduleOp = subOp->getParentOfType<ModuleOp>();
-  //   func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
-    
-  //   if (!streamCreateFunc) {
-  //     OpBuilder::InsertionGuard guard(rewriter);
-  //     rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-  //     auto streamCreateType = rewriter.getFunctionType({}, {ptrType});
-  //     streamCreateFunc = rewriter.create<func::FuncOp>(
-  //       loc, "mgpuStreamCreate", streamCreateType);
-  //     streamCreateFunc.setPrivate();
-  //   }
-    
-  //   auto streamCallOp = rewriter.create<func::CallOp>(
-  //     loc, TypeRange{ptrType}, streamCreateFunc.getName(), ValueRange{});
-  //   auto streamPtr = streamCallOp.getResult(0);
-    
-  //   // Look up or create the mgpuCudnnSub function
-  //   func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>("mgpuCudnnSub");
-    
-  //   if (!funcOp) {
-  //     LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCudnnSub declaration\n");
-  //     OpBuilder::InsertionGuard guard(rewriter);
-  //     rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-  //     auto funcType = rewriter.getFunctionType({
-  //       ptrType, ptrType, ptrType,  // inputA, inputB, output
-  //       i32Type, i32Type, i32Type, i32Type,  // n, c, h, w
-  //       ptrType  // stream
-  //     }, {});
-      
-  //     funcOp = rewriter.create<func::FuncOp>(
-  //       loc, "mgpuCudnnSub", funcType);
-  //     funcOp.setPrivate();
-  //   }
-    
-  //   // Call the function
-  //   std::vector<Value> args = {
-  //     inputPtrA, inputPtrB, outputPtr,
-  //     nValue, cValue, hValue, wValue,
-  //     streamPtr
-  //   };
-    
-  //   rewriter.create<func::CallOp>(
-  //     loc, TypeRange(), funcOp.getName(), ValueRange(args));
-    
-  //   // Synchronize and destroy the stream
-  //   func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
-    
-  //   if (!streamSyncFunc) {
-  //     OpBuilder::InsertionGuard guard(rewriter);
-  //     rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-  //     auto streamSyncType = rewriter.getFunctionType({ptrType}, {});
-  //     streamSyncFunc = rewriter.create<func::FuncOp>(
-  //       loc, "mgpuStreamSynchronize", streamSyncType);
-  //     streamSyncFunc.setPrivate();
-  //   }
-    
-  //   rewriter.create<func::CallOp>(
-  //     loc, TypeRange(), streamSyncFunc.getName(), ValueRange{streamPtr});
-    
-  //   func::FuncOp streamDestroyFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamDestroy");
-    
-  //   if (!streamDestroyFunc) {
-  //     OpBuilder::InsertionGuard guard(rewriter);
-  //     rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-  //     auto streamDestroyType = rewriter.getFunctionType({ptrType}, {});
-  //     streamDestroyFunc = rewriter.create<func::FuncOp>(
-  //       loc, "mgpuStreamDestroy", streamDestroyType);
-  //     streamDestroyFunc.setPrivate();
-  //   }
-    
-  //   rewriter.create<func::CallOp>(
-  //     loc, TypeRange(), streamDestroyFunc.getName(), ValueRange{streamPtr});
-    
-  //   // Convert memref back to tensor
-  //   auto resultTensor = rewriter.create<UnrealizedConversionCastOp>(
-  //       loc, TypeRange{outputType}, ValueRange{outputMemref}).getResult(0);
-    
-  //   rewriter.replaceOp(subOp, resultTensor);
-    
-  //   LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.Sub to cuDNN call\n");
-  //   return success();
-  // }
 
   LogicalResult matchAndRewrite(mlir::ONNXSubOp subOp, PatternRewriter &rewriter) const override {
     // 获取位置信息用于错误报告
@@ -819,6 +640,10 @@ public:
       return rewriter.notifyMatchFailure(subOp, "Inputs must have static shapes");
     }
     
+    // 获取元素类型并确定函数名后缀
+    Type elementType = inputTypeA.getElementType();
+    std::string functionSuffix = getFunctionSuffix(elementType);
+    
     // 检查是否为标量操作 (inputB 是标量)
     bool isScalarOperation = false;
     auto inputShapeB = inputTypeB.getShape();
@@ -830,6 +655,12 @@ public:
       isScalarOperation = true;
       LLVM_DEBUG(llvm::dbgs() << "Detected scalar subtraction\n");
     }
+    
+    // 根据操作类型确定函数名
+    std::string baseFunctionName = isScalarOperation ? "mgpuCudnnSubScalar" : "mgpuCudnnSub";
+    std::string functionName = baseFunctionName + functionSuffix;
+    
+    LLVM_DEBUG(llvm::dbgs() << "Using function: " << functionName << " for element type: " << elementType << "\n");
     
     // 提取输入维度
     auto inputShapeA = inputTypeA.getShape();
@@ -898,9 +729,6 @@ public:
     
     // 创建 CUDA 流
     auto moduleOp = subOp->getParentOfType<ModuleOp>();
-    // auto currentFunc = subOp->getParentOfType<func::FuncOp>();
-
-    // ensureHandlePoolInitialization(moduleOp, rewriter, loc, ptrType, currentFunc);
 
     func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
     
@@ -933,47 +761,23 @@ public:
     rewriter.create<func::CallOp>(
       loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
 
-    // 根据是否为标量操作选择合适的函数
-    func::FuncOp funcOp;
+    // 查找或创建函数
+    func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>(functionName);
     
-    if (isScalarOperation) {
-      // 使用标量减法函数
-      funcOp = moduleOp.lookupSymbol<func::FuncOp>("mgpuCudnnSubScalar");
+    if (!funcOp) {
+      LLVM_DEBUG(llvm::dbgs() << "Creating " << functionName << " declaration\n");
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
       
-      if (!funcOp) {
-        LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCudnnSubScalar declaration\n");
-        OpBuilder::InsertionGuard guard(rewriter);
-        rewriter.setInsertionPointToStart(moduleOp.getBody());
-        
-        auto funcType = rewriter.getFunctionType({
-          ptrType, ptrType, ptrType,  // input, scalar, output
-          i32Type, i32Type, i32Type, i32Type,  // n, c, h, w
-          ptrType  // stream
-        }, {});
-        
-        funcOp = rewriter.create<func::FuncOp>(
-          loc, "mgpuCudnnSubScalar", funcType);
-        funcOp.setPrivate();
-      }
-    } else {
-      // 使用普通张量减法函数
-      funcOp = moduleOp.lookupSymbol<func::FuncOp>("mgpuCudnnSub");
+      auto funcType = rewriter.getFunctionType({
+        ptrType, ptrType, ptrType,  // inputA, inputB/scalar, output
+        i32Type, i32Type, i32Type, i32Type,  // n, c, h, w
+        ptrType  // stream
+      }, {});
       
-      if (!funcOp) {
-        LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCudnnSub declaration\n");
-        OpBuilder::InsertionGuard guard(rewriter);
-        rewriter.setInsertionPointToStart(moduleOp.getBody());
-        
-        auto funcType = rewriter.getFunctionType({
-          ptrType, ptrType, ptrType,  // inputA, inputB, output
-          i32Type, i32Type, i32Type, i32Type,  // n, c, h, w
-          ptrType  // stream
-        }, {});
-        
-        funcOp = rewriter.create<func::FuncOp>(
-          loc, "mgpuCudnnSub", funcType);
-        funcOp.setPrivate();
-      }
+      funcOp = rewriter.create<func::FuncOp>(
+        loc, functionName, funcType);
+      funcOp.setPrivate();
     }
     
     // 调用函数
@@ -1029,180 +833,10 @@ public:
 
 };
 
-// Pattern to convert onnx.Mul to a call to mgpuCudnnMul
+// Pattern to convert onnx.Mul to a call to mgpuCudnnMul[_fp16]
 class MulOpLowering : public OpRewritePattern<mlir::ONNXMulOp>, public ONNXToCuLibsPatternBase {
 public:
   using OpRewritePattern<mlir::ONNXMulOp>::OpRewritePattern;
-
-  // LogicalResult matchAndRewrite(mlir::ONNXMulOp mulOp, PatternRewriter &rewriter) const override {
-  //   // Get the location for error reporting
-  //   Location loc = mulOp.getLoc();
-  //   LLVM_DEBUG(llvm::dbgs() << "Converting onnx.Mul at " << loc << "\n");
-
-  //   // Get the input tensors
-  //   Value inputA = mulOp.getA();
-  //   Value inputB = mulOp.getB();
-    
-  //   // Get the input types
-  //   auto inputTypeA = mlir::dyn_cast<RankedTensorType>(inputA.getType());
-  //   auto inputTypeB = mlir::dyn_cast<RankedTensorType>(inputB.getType());
-    
-  //   if (!inputTypeA || !inputTypeA.hasStaticShape() || !inputTypeB || !inputTypeB.hasStaticShape()) {
-  //     return rewriter.notifyMatchFailure(mulOp, "Inputs must have static shapes");
-  //   }
-    
-  //   // Extract input dimensions
-  //   auto inputShapeA = inputTypeA.getShape();
-  //   if (inputShapeA.size() < 1 || inputShapeA.size() > 4) {
-  //     return rewriter.notifyMatchFailure(mulOp, "Input must be 1D to 4D tensor");
-  //   }
-    
-  //   // Pad shape to 4D (NCHW) if needed
-  //   std::vector<int64_t> paddedShapeA(4, 1);
-  //   int offset = 4 - inputShapeA.size();
-  //   for (size_t i = 0; i < inputShapeA.size(); ++i) {
-  //     paddedShapeA[i + offset] = inputShapeA[i];
-  //   }
-    
-  //   int64_t n = paddedShapeA[0];
-  //   int64_t c = paddedShapeA[1];
-  //   int64_t h = paddedShapeA[2];
-  //   int64_t w = paddedShapeA[3];
-    
-  //   // Create constants for integer parameters
-  //   auto i32Type = rewriter.getI32Type();
-  //   auto createI32Const = [&](int64_t value) -> Value {
-  //     return rewriter.create<arith::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(value));
-  //   };
-    
-  //   auto nValue = createI32Const(n);
-  //   auto cValue = createI32Const(c);
-  //   auto hValue = createI32Const(h);
-  //   auto wValue = createI32Const(w);
-    
-  //   // Prepare input and output buffers
-  //   auto markForBufferization = [&](Value tensor) -> Value {
-  //     auto tensorType = tensor.getType().cast<RankedTensorType>();
-  //     auto memrefType = MemRefType::get(
-  //       tensorType.getShape(),
-  //       tensorType.getElementType());
-  //     return rewriter.create<UnrealizedConversionCastOp>(
-  //       loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
-  //   };
-    
-  //   auto inputMemrefA = markForBufferization(inputA);
-  //   auto inputMemrefB = markForBufferization(inputB);
-    
-  //   // Convert memrefs to void pointers
-  //   auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-    
-  //   auto getPtr = [&](Value memref) -> Value {
-  //     // Extract the aligned pointer as index
-  //     auto indexType = rewriter.getIndexType();
-  //     auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(loc, indexType, memref);
-      
-  //     auto i64Type = rewriter.getIntegerType(64);
-  //     auto ptrI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, ptrIndex);
-      
-  //     return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrI64);
-  //   };
-    
-  //   auto inputPtrA = getPtr(inputMemrefA);
-  //   auto inputPtrB = getPtr(inputMemrefB);
-    
-  //   // Allocate output memref
-  //   auto outputType = mlir::dyn_cast<RankedTensorType>(mulOp.getResult().getType());
-  //   auto outputMemrefType = MemRefType::get(outputType.getShape(), outputType.getElementType());
-  //   auto outputMemref = rewriter.create<memref::AllocOp>(loc, outputMemrefType);
-  //   auto outputPtr = getPtr(outputMemref);
-    
-  //   // Create a CUDA stream
-  //   auto moduleOp = mulOp->getParentOfType<ModuleOp>();
-  //   func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
-    
-  //   if (!streamCreateFunc) {
-  //     OpBuilder::InsertionGuard guard(rewriter);
-  //     rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-  //     auto streamCreateType = rewriter.getFunctionType({}, {ptrType});
-  //     streamCreateFunc = rewriter.create<func::FuncOp>(
-  //       loc, "mgpuStreamCreate", streamCreateType);
-  //     streamCreateFunc.setPrivate();
-  //   }
-    
-  //   auto streamCallOp = rewriter.create<func::CallOp>(
-  //     loc, TypeRange{ptrType}, streamCreateFunc.getName(), ValueRange{});
-  //   auto streamPtr = streamCallOp.getResult(0);
-    
-  //   // Look up or create the mgpuCudnnMul function
-  //   func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>("mgpuCudnnMul");
-    
-  //   if (!funcOp) {
-  //     LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCudnnMul declaration\n");
-  //     OpBuilder::InsertionGuard guard(rewriter);
-  //     rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-  //     auto funcType = rewriter.getFunctionType({
-  //       ptrType, ptrType, ptrType,  // inputA, inputB, output
-  //       i32Type, i32Type, i32Type, i32Type,  // n, c, h, w
-  //       ptrType  // stream
-  //     }, {});
-      
-  //     funcOp = rewriter.create<func::FuncOp>(
-  //       loc, "mgpuCudnnMul", funcType);
-  //     funcOp.setPrivate();
-  //   }
-    
-  //   // Call the function
-  //   std::vector<Value> args = {
-  //     inputPtrA, inputPtrB, outputPtr,
-  //     nValue, cValue, hValue, wValue,
-  //     streamPtr
-  //   };
-    
-  //   rewriter.create<func::CallOp>(
-  //     loc, TypeRange(), funcOp.getName(), ValueRange(args));
-    
-  //   // Synchronize and destroy the stream
-  //   func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
-    
-  //   if (!streamSyncFunc) {
-  //     OpBuilder::InsertionGuard guard(rewriter);
-  //     rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-  //     auto streamSyncType = rewriter.getFunctionType({ptrType}, {});
-  //     streamSyncFunc = rewriter.create<func::FuncOp>(
-  //       loc, "mgpuStreamSynchronize", streamSyncType);
-  //     streamSyncFunc.setPrivate();
-  //   }
-    
-  //   rewriter.create<func::CallOp>(
-  //     loc, TypeRange(), streamSyncFunc.getName(), ValueRange{streamPtr});
-    
-  //   func::FuncOp streamDestroyFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamDestroy");
-    
-  //   if (!streamDestroyFunc) {
-  //     OpBuilder::InsertionGuard guard(rewriter);
-  //     rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-  //     auto streamDestroyType = rewriter.getFunctionType({ptrType}, {});
-  //     streamDestroyFunc = rewriter.create<func::FuncOp>(
-  //       loc, "mgpuStreamDestroy", streamDestroyType);
-  //     streamDestroyFunc.setPrivate();
-  //   }
-    
-  //   rewriter.create<func::CallOp>(
-  //     loc, TypeRange(), streamDestroyFunc.getName(), ValueRange{streamPtr});
-    
-  //   // Convert memref back to tensor
-  //   auto resultTensor = rewriter.create<UnrealizedConversionCastOp>(
-  //       loc, TypeRange{outputType}, ValueRange{outputMemref}).getResult(0);
-    
-  //   rewriter.replaceOp(mulOp, resultTensor);
-    
-  //   LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.Mul to cuDNN call\n");
-  //   return success();
-  // }
 
   LogicalResult matchAndRewrite(mlir::ONNXMulOp mulOp, PatternRewriter &rewriter) const override {
     // 获取位置信息用于错误报告
@@ -1221,6 +855,10 @@ public:
       return rewriter.notifyMatchFailure(mulOp, "Inputs must have static shapes");
     }
     
+    // 获取元素类型并确定函数名后缀
+    Type elementType = inputTypeA.getElementType();
+    std::string functionSuffix = getFunctionSuffix(elementType);
+    
     // 检查是否为标量操作 (inputB 是标量)
     bool isScalarOperation = false;
     auto inputShapeB = inputTypeB.getShape();
@@ -1232,6 +870,12 @@ public:
       isScalarOperation = true;
       LLVM_DEBUG(llvm::dbgs() << "Detected scalar multiplication\n");
     }
+    
+    // 根据操作类型确定函数名
+    std::string baseFunctionName = isScalarOperation ? "mgpuCudnnMulScalar" : "mgpuCudnnMul";
+    std::string functionName = baseFunctionName + functionSuffix;
+    
+    LLVM_DEBUG(llvm::dbgs() << "Using function: " << functionName << " for element type: " << elementType << "\n");
     
     // 提取输入维度
     auto inputShapeA = inputTypeA.getShape();
@@ -1300,9 +944,6 @@ public:
     
     // 创建 CUDA 流
     auto moduleOp = mulOp->getParentOfType<ModuleOp>();
-    // auto currentFunc = mulOp->getParentOfType<func::FuncOp>();
-
-    // ensureHandlePoolInitialization(moduleOp, rewriter, loc, ptrType, currentFunc);
 
     func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
     
@@ -1335,47 +976,23 @@ public:
     rewriter.create<func::CallOp>(
       loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
 
-    // 根据是否为标量操作选择合适的函数
-    func::FuncOp funcOp;
+    // 查找或创建函数
+    func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>(functionName);
     
-    if (isScalarOperation) {
-      // 使用标量乘法函数
-      funcOp = moduleOp.lookupSymbol<func::FuncOp>("mgpuCudnnMulScalar");
+    if (!funcOp) {
+      LLVM_DEBUG(llvm::dbgs() << "Creating " << functionName << " declaration\n");
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
       
-      if (!funcOp) {
-        LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCudnnMulScalar declaration\n");
-        OpBuilder::InsertionGuard guard(rewriter);
-        rewriter.setInsertionPointToStart(moduleOp.getBody());
-        
-        auto funcType = rewriter.getFunctionType({
-          ptrType, ptrType, ptrType,  // input, scalar, output
-          i32Type, i32Type, i32Type, i32Type,  // n, c, h, w
-          ptrType  // stream
-        }, {});
-        
-        funcOp = rewriter.create<func::FuncOp>(
-          loc, "mgpuCudnnMulScalar", funcType);
-        funcOp.setPrivate();
-      }
-    } else {
-      // 使用普通张量乘法函数
-      funcOp = moduleOp.lookupSymbol<func::FuncOp>("mgpuCudnnMul");
+      auto funcType = rewriter.getFunctionType({
+        ptrType, ptrType, ptrType,  // inputA, inputB/scalar, output
+        i32Type, i32Type, i32Type, i32Type,  // n, c, h, w
+        ptrType  // stream
+      }, {});
       
-      if (!funcOp) {
-        LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCudnnMul declaration\n");
-        OpBuilder::InsertionGuard guard(rewriter);
-        rewriter.setInsertionPointToStart(moduleOp.getBody());
-        
-        auto funcType = rewriter.getFunctionType({
-          ptrType, ptrType, ptrType,  // inputA, inputB, output
-          i32Type, i32Type, i32Type, i32Type,  // n, c, h, w
-          ptrType  // stream
-        }, {});
-        
-        funcOp = rewriter.create<func::FuncOp>(
-          loc, "mgpuCudnnMul", funcType);
-        funcOp.setPrivate();
-      }
+      funcOp = rewriter.create<func::FuncOp>(
+        loc, functionName, funcType);
+      funcOp.setPrivate();
     }
     
     // 调用函数
@@ -1431,7 +1048,7 @@ public:
 
 };
 
-// Pattern to convert onnx.Neg to a call to mgpuCudnnNeg
+// Pattern to convert onnx.Neg to a call to mgpuCudnnNeg[_fp16]
 class NegOpLowering : public OpRewritePattern<mlir::ONNXNegOp>, public ONNXToCuLibsPatternBase {
 public:
   using OpRewritePattern<mlir::ONNXNegOp>::OpRewritePattern;
@@ -1450,6 +1067,13 @@ public:
     if (!inputType || !inputType.hasStaticShape()) {
       return rewriter.notifyMatchFailure(negOp, "Input must have static shape");
     }
+    
+    // 获取元素类型并确定函数名后缀
+    Type elementType = inputType.getElementType();
+    std::string functionSuffix = getFunctionSuffix(elementType);
+    std::string functionName = "mgpuCudnnNeg" + functionSuffix;
+    
+    LLVM_DEBUG(llvm::dbgs() << "Using function: " << functionName << " for element type: " << elementType << "\n");
     
     // Extract input dimensions
     auto inputShape = inputType.getShape();
@@ -1516,9 +1140,6 @@ public:
     
     // Create a CUDA stream
     auto moduleOp = negOp->getParentOfType<ModuleOp>();
-    // auto currentFunc = negOp->getParentOfType<func::FuncOp>();
-
-    // ensureHandlePoolInitialization(moduleOp, rewriter, loc, ptrType, currentFunc);
 
     func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
     
@@ -1551,11 +1172,11 @@ public:
     rewriter.create<func::CallOp>(
       loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
 
-    // Look up or create the mgpuCudnnNeg function
-    func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>("mgpuCudnnNeg");
+    // Look up or create the function
+    func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>(functionName);
     
     if (!funcOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCudnnNeg declaration\n");
+      LLVM_DEBUG(llvm::dbgs() << "Creating " << functionName << " declaration\n");
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(moduleOp.getBody());
       
@@ -1566,7 +1187,7 @@ public:
       }, {});
       
       funcOp = rewriter.create<func::FuncOp>(
-        loc, "mgpuCudnnNeg", funcType);
+        loc, functionName, funcType);
       funcOp.setPrivate();
     }
     
@@ -1622,7 +1243,7 @@ public:
   }
 };
 
-// Pattern to convert onnx.MatMul to a call to mgpuCulibsFullyConnectedForward
+// Pattern to convert onnx.MatMul to a call to mgpuCulibsFullyConnectedForward[_fp16]
 class MatMulOpLowering : public OpRewritePattern<mlir::ONNXMatMulOp>, public ONNXToCuLibsPatternBase {
 public:
   using OpRewritePattern<mlir::ONNXMatMulOp>::OpRewritePattern;
@@ -1643,6 +1264,13 @@ public:
     if (!inputTypeA || !inputTypeA.hasStaticShape() || !inputTypeB || !inputTypeB.hasStaticShape()) {
       return rewriter.notifyMatchFailure(matMulOp, "Inputs must have static shapes");
     }
+    
+    // 获取元素类型并确定函数名后缀
+    Type elementType = inputTypeA.getElementType();
+    std::string functionSuffix = getFunctionSuffix(elementType);
+    std::string functionName = "mgpuCulibsFullyConnectedForward" + functionSuffix;
+    
+    LLVM_DEBUG(llvm::dbgs() << "Using function: " << functionName << " for element type: " << elementType << "\n");
     
     // 提取输入维度
     auto inputShapeA = inputTypeA.getShape();
@@ -1720,9 +1348,6 @@ public:
     
     // 创建CUDA流
     auto moduleOp = matMulOp->getParentOfType<ModuleOp>();
-    // auto currentFunc = matMulOp->getParentOfType<func::FuncOp>();
-
-    // ensureHandlePoolInitialization(moduleOp, rewriter, loc, ptrType, currentFunc);
 
     func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
     
@@ -1759,10 +1384,10 @@ public:
     auto transBValue = createI32Const(0);
 
     // 创建或查找FC函数声明
-    func::FuncOp fcFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCulibsFullyConnectedForward");
+    func::FuncOp fcFunc = moduleOp.lookupSymbol<func::FuncOp>(functionName);
     
     if (!fcFunc) {
-      LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCulibsFullyConnectedForward declaration\n");
+      LLVM_DEBUG(llvm::dbgs() << "Creating " << functionName << " declaration\n");
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(moduleOp.getBody());
       
@@ -1775,7 +1400,7 @@ public:
       }, {});
       
       fcFunc = rewriter.create<func::FuncOp>(
-        loc, "mgpuCulibsFullyConnectedForward", fcFuncType);
+        loc, functionName, fcFuncType);
       fcFunc.setPrivate();
     }
     
@@ -1837,297 +1462,325 @@ public:
   }
 };
 
-// // Pattern to convert onnx.Gemm to a call to mgpuCulibsFullyConnectedForward
-// class GemmOpLowering : public OpRewritePattern<mlir::ONNXGemmOp>, public ONNXToCuLibsPatternBase {
-// public:
-//   using OpRewritePattern<mlir::ONNXGemmOp>::OpRewritePattern;
+// Pattern to convert onnx.Flatten+onnx.Gemm to a call to mgpuCulibsFlattenFullyConnectedForward[_fp16]
+class FlattenGemmOpLowering : public OpRewritePattern<mlir::ONNXGemmOp>, public ONNXToCuLibsPatternBase {
+public:
+  using OpRewritePattern<mlir::ONNXGemmOp>::OpRewritePattern;
 
-//   LogicalResult matchAndRewrite(mlir::ONNXGemmOp gemmOp, PatternRewriter &rewriter) const override {
-//     // 获取位置信息用于错误报告
-//     Location loc = gemmOp.getLoc();
-//     LLVM_DEBUG(llvm::dbgs() << "Converting onnx.Gemm at " << loc << "\n");
+  LogicalResult matchAndRewrite(mlir::ONNXGemmOp gemmOp, PatternRewriter &rewriter) const override {
+    // First, check if the input to the Gemm is from a Flatten operation
+    auto flattenOp = gemmOp.getA().getDefiningOp<mlir::ONNXFlattenOp>();
+    if (!flattenOp) {
+      // Not a Flatten->Gemm pattern, skip this operation
+      return failure();
+    }
 
-//     // 获取输入张量
-//     Value inputA = gemmOp.getA();
-//     Value inputB = gemmOp.getB();
-//     Value inputC = gemmOp.getC(); // 这是偏置
-    
-//     // 获取属性
-//     // float alpha = 1.0f;
-//     // if (auto alphaAttr = gemmOp.getAlpha())
-//     //   alpha = alphaAttr.value().convertToFloat();
-      
-//     // float beta = 1.0f;
-//     // if (auto betaAttr = gemmOp.getBeta())
-//     //   beta = betaAttr.value().convertToFloat();
+    // Get the location for error reporting
+    Location loc = gemmOp.getLoc();
+    LLVM_DEBUG(llvm::dbgs() << "Converting onnx.Flatten+onnx.Gemm at " << loc << "\n");
 
-//     float alpha = 1.0f;
-//     if (auto alphaAttr = dyn_cast_or_null<FloatAttr>(gemmOp.getAlphaAttr()))
-//       alpha = alphaAttr.getValueAsDouble();
-      
-//     float beta = 1.0f;
-//     if (auto betaAttr = dyn_cast_or_null<FloatAttr>(gemmOp.getBetaAttr()))
-//       beta = betaAttr.getValueAsDouble();
+    // Get the original input (before flattening)
+    Value originalInput = flattenOp.getInput();
+    Value weights = gemmOp.getB();
+    Value bias = gemmOp.getC();
     
-//     // bool transA = false;
-//     // if (auto transAAttr = gemmOp.getTransA())
-//     //   transA = transAAttr.value() != 0;
+    // 获取元素类型并确定函数名后缀
+    auto inputType = mlir::dyn_cast<RankedTensorType>(originalInput.getType());
+    if (!inputType) {
+      return rewriter.notifyMatchFailure(flattenOp, "Input must be a ranked tensor");
+    }
+    
+    Type elementType = inputType.getElementType();
+    std::string functionSuffix = getFunctionSuffix(elementType);
+    std::string functionName = "mgpuCulibsFlattenFullyConnectedForward" + functionSuffix;
+    
+    LLVM_DEBUG(llvm::dbgs() << "Using function: " << functionName << " for element type: " << elementType << "\n");
+    
+    // Check that the Flatten has axis=1 (we only support that case)
+    int64_t flattenAxis = 1;
+    if (auto axisAttr = flattenOp.getAxisAttr()) {
+      flattenAxis = axisAttr.getValue().getSExtValue();
+    }
+    
+    if (flattenAxis != 1) {
+      return rewriter.notifyMatchFailure(flattenOp, "Only support flattening with axis=1");
+    }
+    
+    // Get the original input type
+    if (!inputType || !inputType.hasStaticShape()) {
+      return rewriter.notifyMatchFailure(flattenOp, "Input must have static shape");
+    }
+    
+    // Get input dimensions
+    auto inputShape = inputType.getShape();
+    if (inputShape.size() != 4) {
+      return rewriter.notifyMatchFailure(flattenOp, "Only 4D NCHW inputs are supported for now");
+    }
+    
+    // Extract NCHW dimensions
+    int64_t batchSize = inputShape[0];
+    int64_t channels = inputShape[1];
+    int64_t height = inputShape[2];
+    int64_t width = inputShape[3];
+    
+    // Calculate flattened features
+    int64_t flattenedFeatures = channels * height * width;
+    
+    // Get the weights type
+    auto weightType = mlir::dyn_cast<RankedTensorType>(weights.getType());
+    if (!weightType || !weightType.hasStaticShape()) {
+      return rewriter.notifyMatchFailure(gemmOp, "Weights must have static shape");
+    }
+    
+    // Extract weight dimensions
+    auto weightShape = weightType.getShape();
+    if (weightShape.size() != 2) {
+      return rewriter.notifyMatchFailure(gemmOp, "Weights must be 2D");
+    }
+    
+    // Get attributes from Gemm op
+    float alpha = 1.0f;
+    if (auto alphaAttr = dyn_cast_or_null<FloatAttr>(gemmOp.getAlphaAttr()))
+      alpha = alphaAttr.getValueAsDouble();
       
-//     // bool transB = false;
-//     // if (auto transBAttr = gemmOp.getTransB())
-//     //   transB = transBAttr.value() != 0;
+    float beta = 1.0f;
+    if (auto betaAttr = dyn_cast_or_null<FloatAttr>(gemmOp.getBetaAttr()))
+      beta = betaAttr.getValueAsDouble();
+    
+    bool transA = false;
+    if (auto transAAttr = gemmOp.getTransAAttr()) {
+      if (auto intAttr = dyn_cast<IntegerAttr>(transAAttr)) {
+        transA = intAttr.getValue().getSExtValue() != 0;
+      }
+    }
 
-//     bool transA = false;
-//     if (auto transAAttr = gemmOp.getTransAAttr()) {
-//       if (auto intAttr = dyn_cast<IntegerAttr>(transAAttr)) {
-//         // 使用 getSExtValue() 安全地获取有符号整数值
-//         transA = intAttr.getValue().getSExtValue() != 0;
-//       }
-//     }
+    bool transB = false;
+    if (auto transBAttr = gemmOp.getTransBAttr()) {
+      if (auto intAttr = dyn_cast<IntegerAttr>(transBAttr)) {
+        transB = intAttr.getValue().getSExtValue() != 0;
+      }
+    }
+    
+    // Check for unsupported attributes
+    if (alpha != 1.0f) {
+      return rewriter.notifyMatchFailure(gemmOp, "Alpha != 1.0 not supported yet");
+    }
+    
+    if (beta != 1.0f) {
+      return rewriter.notifyMatchFailure(gemmOp, "Beta != 1.0 not supported yet");
+    }
+    
+    if (transA) {
+      return rewriter.notifyMatchFailure(gemmOp, "TransA=1 not supported for flattened FC");
+    }
+    
+    // 根据transB标志正确处理权重维度
+    int64_t weight_input_dim, weight_output_dim;
+    if (transB) {
+      // transB=1时，权重会被转置，所以原始权重格式为 [output_features, input_features]
+      weight_input_dim = weightShape[1];    // 转置后的输入维度
+      weight_output_dim = weightShape[0];   // 转置后的输出维度
+    } else {
+      // transB=0时，权重格式为 [input_features, output_features]
+      weight_input_dim = weightShape[0];
+      weight_output_dim = weightShape[1];
+    }
+    
+    // Check that the flattened dimension matches the weight input dimension
+    if (flattenedFeatures != weight_input_dim) {
+      return rewriter.notifyMatchFailure(gemmOp, "Flattened dimension doesn't match weight input dimension");
+    }
+    
+    int64_t outputFeatures = weight_output_dim;
+    
+    LLVM_DEBUG(llvm::dbgs() << "Flatten+Gemm dimensions: batchSize=" << batchSize 
+               << ", flattenedFeatures=" << flattenedFeatures 
+               << ", outputFeatures=" << outputFeatures 
+               << ", transB=" << transB << "\n");
+    
+    // Create constants for integer parameters
+    auto i32Type = rewriter.getI32Type();
+    auto createI32Const = [&](int64_t value) -> Value {
+      return rewriter.create<arith::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(value));
+    };
+    
+    auto batchSizeValue = createI32Const(batchSize);
+    auto channelsValue = createI32Const(channels);
+    auto heightValue = createI32Const(height);
+    auto widthValue = createI32Const(width);
+    auto outputFeaturesValue = createI32Const(outputFeatures);
+    
+    // 创建transB标志
+    auto transBValue = createI32Const(transB ? 1 : 0);
+    
+    // Mark tensors for bufferization
+    auto markForBufferization = [&](Value tensor) -> Value {
+      if (!tensor)
+        return nullptr;
+      
+      auto tensorType = tensor.getType().cast<RankedTensorType>();
+      auto memrefType = MemRefType::get(
+        tensorType.getShape(),
+        tensorType.getElementType());
+      return rewriter.create<UnrealizedConversionCastOp>(
+        loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
+    };
+    
+    auto inputMemref = markForBufferization(originalInput);
+    auto weightMemref = markForBufferization(weights);
+    auto biasMemref = markForBufferization(bias);
+    
+    // Convert memrefs to void pointers
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    
+    auto getPtr = [&](Value memref) -> Value {
+      if (!memref) {
+        MultiDialectBuilder<LLVMBuilder> create(rewriter, loc);
+        return create.llvm.null(ptrType);
+      }
+      
+      // Extract the aligned pointer as index
+      auto indexType = rewriter.getIndexType();
+      auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(loc, indexType, memref);
+      
+      auto i64Type = rewriter.getIntegerType(64);
+      auto ptrI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, ptrIndex);
+      
+      return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrI64);
+    };
+    
+    auto inputPtr = getPtr(inputMemref);
+    auto weightPtr = getPtr(weightMemref);
+    Value biasPtr;
+    if (biasMemref)
+      biasPtr = getPtr(biasMemref);
+    else {
+      MultiDialectBuilder<LLVMBuilder> create(rewriter, loc);
+      biasPtr = create.llvm.null(ptrType);
+    }
+    
+    // Allocate output memref
+    auto outputType = mlir::dyn_cast<RankedTensorType>(gemmOp.getResult().getType());
+    auto outputMemrefType = MemRefType::get(outputType.getShape(), outputType.getElementType());
+    auto outputMemref = rewriter.create<memref::AllocOp>(loc, outputMemrefType);
+    auto outputPtr = getPtr(outputMemref);
+    
+    // Create a CUDA stream
+    auto moduleOp = gemmOp->getParentOfType<ModuleOp>();
 
-//     bool transB = false;
-//     if (auto transBAttr = gemmOp.getTransBAttr()) {
-//       if (auto intAttr = dyn_cast<IntegerAttr>(transBAttr)) {
-//         // 使用 getSExtValue() 安全地获取有符号整数值
-//         transB = intAttr.getValue().getSExtValue() != 0;
-//       }
-//     }
+    func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
     
-//     // 检查是否有需要特殊处理的alpha和beta值
-//     if (alpha != 1.0f) {
-//       return rewriter.notifyMatchFailure(gemmOp, "Alpha != 1.0 not supported yet");
-//     }
-    
-//     if (beta != 1.0f) {
-//       return rewriter.notifyMatchFailure(gemmOp, "Beta != 1.0 not supported yet");
-//     }
-    
-//     // 获取输入类型
-//     auto inputTypeA = mlir::dyn_cast<RankedTensorType>(inputA.getType());
-//     auto inputTypeB = mlir::dyn_cast<RankedTensorType>(inputB.getType());
-    
-//     if (!inputTypeA || !inputTypeA.hasStaticShape() || !inputTypeB || !inputTypeB.hasStaticShape()) {
-//       return rewriter.notifyMatchFailure(gemmOp, "Inputs must have static shapes");
-//     }
-    
-//     // 提取输入维度
-//     auto inputShapeA = inputTypeA.getShape();
-//     auto inputShapeB = inputTypeB.getShape();
-    
-//     // Gemm需要2D张量
-//     if (inputShapeA.size() != 2 || inputShapeB.size() != 2) {
-//       return rewriter.notifyMatchFailure(gemmOp, "Gemm inputs must be 2D tensors");
-//     }
-    
-//     // 根据转置标志确定实际维度
-//     int64_t batch_size, input_features;
-//     if (transA) {
-//       batch_size = inputShapeA[1];
-//       input_features = inputShapeA[0];
-//     } else {
-//       batch_size = inputShapeA[0];
-//       input_features = inputShapeA[1];
-//     }
-    
-//     int64_t weight_rows, weight_cols;
-//     if (transB) {
-//       weight_rows = inputShapeB[1];
-//       weight_cols = inputShapeB[0];
-//     } else {
-//       weight_rows = inputShapeB[0];
-//       weight_cols = inputShapeB[1];
-//     }
-    
-//     // 验证内部维度匹配
-//     if (input_features != weight_rows) {
-//       return rewriter.notifyMatchFailure(gemmOp, "Inner dimensions must match for Gemm");
-//     }
-    
-//     int64_t output_features = weight_cols;
-    
-//     LLVM_DEBUG(llvm::dbgs() << "Gemm dimensions: batch_size=" << batch_size 
-//                << ", input_features=" << input_features 
-//                << ", output_features=" << output_features 
-//                << ", transA=" << transA << ", transB=" << transB << "\n");
-    
-//     // 如果转置标志不是FC层支持的形式，报错
-//     if (transA) {
-//       return rewriter.notifyMatchFailure(gemmOp, "TransA=1 not supported for FC conversion");
-//     }
-    
-//     // 创建常量用于整数参数
-//     auto i32Type = rewriter.getI32Type();
-//     auto createI32Const = [&](int64_t value) -> Value {
-//       return rewriter.create<arith::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(value));
-//     };
-    
-//     auto batchSizeValue = createI32Const(batch_size);
-//     auto inputFeaturesValue = createI32Const(input_features);
-//     auto outputFeaturesValue = createI32Const(output_features);
-    
-//     // 将输入张量标记为缓冲区
-//     auto markForBufferization = [&](Value tensor) -> Value {
-//       if (!tensor)
-//         return nullptr;
+    if (!streamCreateFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
       
-//       auto tensorType = tensor.getType().cast<RankedTensorType>();
-//       auto memrefType = MemRefType::get(
-//         tensorType.getShape(),
-//         tensorType.getElementType());
-//       return rewriter.create<UnrealizedConversionCastOp>(
-//         loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
-//     };
-    
-//     auto inputMemrefA = markForBufferization(inputA);
-//     auto inputMemrefB = markForBufferization(inputB);
-//     auto biasMemref = markForBufferization(inputC);
-    
-//     // 将memref转为void指针
-//     auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-    
-//     auto getPtr = [&](Value memref) -> Value {
-//       if (!memref) {
-//         MultiDialectBuilder<LLVMBuilder> create(rewriter, loc);
-//         return create.llvm.null(ptrType);
-//       }
-      
-//       // 提取对齐的指针为索引
-//       auto indexType = rewriter.getIndexType();
-//       auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(loc, indexType, memref);
-      
-//       auto i64Type = rewriter.getIntegerType(64);
-//       auto ptrI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, ptrIndex);
-      
-//       return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrI64);
-//     };
-    
-//     auto inputPtrA = getPtr(inputMemrefA);
-//     auto weightPtrB = getPtr(inputMemrefB);
-//     // auto biasPtrC = biasMemref ? getPtr(biasMemref) : rewriter.create<LLVM::NullOp>(loc, ptrType).getResult();
-//     Value biasPtrC;
-//     if (biasMemref) {
-//         biasPtrC = getPtr(biasMemref);
-//     } else {
-//         MultiDialectBuilder<LLVMBuilder> create(rewriter, loc);
-//         biasPtrC = create.llvm.null(ptrType);
-//     }
-    
-//     // 分配输出memref
-//     auto outputType = mlir::dyn_cast<RankedTensorType>(gemmOp.getResult().getType());
-//     auto outputMemrefType = MemRefType::get(outputType.getShape(), outputType.getElementType());
-//     auto outputMemref = rewriter.create<memref::AllocOp>(loc, outputMemrefType);
-//     auto outputPtr = getPtr(outputMemref);
-    
-//     // 创建CUDA流
-//     auto moduleOp = gemmOp->getParentOfType<ModuleOp>();
-//     // auto currentFunc = gemmOp->getParentOfType<func::FuncOp>();
+      auto streamCreateType = rewriter.getFunctionType({}, {ptrType});
+      streamCreateFunc = rewriter.create<func::FuncOp>(
+        loc, "mgpuStreamCreate", streamCreateType);
+      streamCreateFunc.setPrivate();
+    }
 
-//     // ensureHandlePoolInitialization(moduleOp, rewriter, loc, ptrType, currentFunc);
+    func::FuncOp handleCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCreateHandlesForStream");
 
-//     func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
-    
-//     if (!streamCreateFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
+    if (!handleCreateFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
       
-//       auto streamCreateType = rewriter.getFunctionType({}, {ptrType});
-//       streamCreateFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuStreamCreate", streamCreateType);
-//       streamCreateFunc.setPrivate();
-//     }
+      auto handleCreateType = rewriter.getFunctionType({ptrType}, {});
+      handleCreateFunc = rewriter.create<func::FuncOp>(
+        loc, "mgpuCreateHandlesForStream", handleCreateType);
+      handleCreateFunc.setPrivate();
+    }
+    
+    auto streamCallOp = rewriter.create<func::CallOp>(
+      loc, TypeRange{ptrType}, streamCreateFunc.getName(), ValueRange{});
+    auto streamPtr = streamCallOp.getResult(0);
+    
+    rewriter.create<func::CallOp>(
+      loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
 
-//     func::FuncOp handleCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCreateHandlesForStream");
+    // Create or locate the flatten-FC function declaration
+    func::FuncOp fcFunc = moduleOp.lookupSymbol<func::FuncOp>(functionName);
+    
+    if (!fcFunc) {
+      LLVM_DEBUG(llvm::dbgs() << "Creating " << functionName << " declaration\n");
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
+      
+      auto fcFuncType = rewriter.getFunctionType({
+        i32Type, i32Type, i32Type, i32Type,  // batch_size, channels, height, width
+        i32Type,                             // output_features
+        i32Type,                             // transB 标志
+        ptrType, ptrType, ptrType,           // input_data, weight_data, bias_data
+        ptrType,                             // output_data
+        ptrType                              // stream
+      }, {});
+      
+      fcFunc = rewriter.create<func::FuncOp>(
+        loc, functionName, fcFuncType);
+      fcFunc.setPrivate();
+    }
+    
+    // Call the function
+    std::vector<Value> args = {
+      batchSizeValue, channelsValue, heightValue, widthValue,
+      outputFeaturesValue,
+      transBValue,  // 传递transB标志
+      inputPtr, weightPtr, biasPtr,
+      outputPtr, streamPtr
+    };
+    
+    rewriter.create<func::CallOp>(
+      loc, TypeRange(), fcFunc.getName(), ValueRange(args));
+    
+    // Synchronize the stream
+    func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
+    
+    if (!streamSyncFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
+      
+      auto streamSyncType = rewriter.getFunctionType({ptrType}, {});
+      streamSyncFunc = rewriter.create<func::FuncOp>(
+        loc, "mgpuStreamSynchronize", streamSyncType);
+      streamSyncFunc.setPrivate();
+    }
+    
+    rewriter.create<func::CallOp>(
+      loc, TypeRange(), streamSyncFunc.getName(), ValueRange{streamPtr});
+    
+    // Destroy the stream
+    func::FuncOp streamDestroyFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamDestroy");
+    
+    if (!streamDestroyFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
+      
+      auto streamDestroyType = rewriter.getFunctionType({ptrType}, {});
+      streamDestroyFunc = rewriter.create<func::FuncOp>(
+        loc, "mgpuStreamDestroy", streamDestroyType);
+      streamDestroyFunc.setPrivate();
+    }
+    
+    rewriter.create<func::CallOp>(
+      loc, TypeRange(), streamDestroyFunc.getName(), ValueRange{streamPtr});
+    
+    // Convert memref back to tensor
+    auto resultTensor = rewriter.create<UnrealizedConversionCastOp>(
+        loc, TypeRange{outputType}, ValueRange{outputMemref}).getResult(0);
+    
+    rewriter.replaceOp(gemmOp, resultTensor);
+    
+    // The Flatten op will be removed automatically if it has no other uses
+    if (flattenOp.use_empty())
+      rewriter.eraseOp(flattenOp);
+    
+    LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.Flatten+onnx.Gemm to FC call\n");
+    return success();
+  }
+};
 
-//     if (!handleCreateFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-//       auto handleCreateType = rewriter.getFunctionType({ptrType}, {});
-//       handleCreateFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuCreateHandlesForStream", handleCreateType);
-//       handleCreateFunc.setPrivate();
-//     }
-    
-//     auto streamCallOp = rewriter.create<func::CallOp>(
-//       loc, TypeRange{ptrType}, streamCreateFunc.getName(), ValueRange{});
-//     auto streamPtr = streamCallOp.getResult(0);
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
-
-//     // 创建或查找FC函数声明
-//     func::FuncOp fcFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCulibsFullyConnectedForward");
-    
-//     if (!fcFunc) {
-//       LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCulibsFullyConnectedForward declaration\n");
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-//       auto fcFuncType = rewriter.getFunctionType({
-//         i32Type, i32Type, i32Type,  // batch_size, input_features, output_features
-//         ptrType, ptrType, ptrType,  // input_data, weight_data, bias_data
-//         ptrType,                    // output_data
-//         ptrType                     // stream
-//       }, {});
-      
-//       fcFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuCulibsFullyConnectedForward", fcFuncType);
-//       fcFunc.setPrivate();
-//     }
-    
-//     // 调用FC函数
-//     std::vector<Value> args = {
-//       batchSizeValue, inputFeaturesValue, outputFeaturesValue,
-//       inputPtrA, weightPtrB, biasPtrC,
-//       outputPtr, streamPtr
-//     };
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange(), fcFunc.getName(), ValueRange(args));
-    
-//     // 同步流
-//     func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
-    
-//     if (!streamSyncFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-//       auto streamSyncType = rewriter.getFunctionType({ptrType}, {});
-//       streamSyncFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuStreamSynchronize", streamSyncType);
-//       streamSyncFunc.setPrivate();
-//     }
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange(), streamSyncFunc.getName(), ValueRange{streamPtr});
-    
-//     // 销毁流
-//     func::FuncOp streamDestroyFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamDestroy");
-    
-//     if (!streamDestroyFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-//       auto streamDestroyType = rewriter.getFunctionType({ptrType}, {});
-//       streamDestroyFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuStreamDestroy", streamDestroyType);
-//       streamDestroyFunc.setPrivate();
-//     }
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange(), streamDestroyFunc.getName(), ValueRange{streamPtr});
-    
-//     // 将memref转回tensor
-//     auto resultTensor = rewriter.create<UnrealizedConversionCastOp>(
-//         loc, TypeRange{outputType}, ValueRange{outputMemref}).getResult(0);
-    
-//     rewriter.replaceOp(gemmOp, resultTensor);
-    
-//     LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.Gemm to FC call\n");
-//     return success();
-//   }
-// };
-
+// Pattern to convert onnx.Gemm to a call to mgpuCulibsFullyConnectedForward[_fp16]
 class GemmOpLowering : public OpRewritePattern<mlir::ONNXGemmOp>, public ONNXToCuLibsPatternBase {
 public:
   using OpRewritePattern<mlir::ONNXGemmOp>::OpRewritePattern;
@@ -2141,6 +1794,18 @@ public:
     Value inputA = gemmOp.getA();
     Value inputB = gemmOp.getB();
     Value inputC = gemmOp.getC(); // 这是偏置
+    
+    // 获取输入类型并确定函数名后缀
+    auto inputTypeA = mlir::dyn_cast<RankedTensorType>(inputA.getType());
+    if (!inputTypeA) {
+      return rewriter.notifyMatchFailure(gemmOp, "Input A must be a ranked tensor");
+    }
+    
+    Type elementType = inputTypeA.getElementType();
+    std::string functionSuffix = getFunctionSuffix(elementType);
+    std::string functionName = "mgpuCulibsFullyConnectedForward" + functionSuffix;
+    
+    LLVM_DEBUG(llvm::dbgs() << "Using function: " << functionName << " for element type: " << elementType << "\n");
     
     // 获取属性
     float alpha = 1.0f;
@@ -2175,7 +1840,6 @@ public:
     }
     
     // 获取输入类型
-    auto inputTypeA = mlir::dyn_cast<RankedTensorType>(inputA.getType());
     auto inputTypeB = mlir::dyn_cast<RankedTensorType>(inputB.getType());
     
     if (!inputTypeA || !inputTypeA.hasStaticShape() || !inputTypeB || !inputTypeB.hasStaticShape()) {
@@ -2327,11 +1991,11 @@ public:
     rewriter.create<func::CallOp>(
       loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
 
-    // 创建或查找FC函数声明 - 现在需要支持transB参数
-    func::FuncOp fcFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCulibsFullyConnectedForward");
+    // 创建或查找FC函数声明 - 现在需要支持transB参数和FP16/FP32后缀
+    func::FuncOp fcFunc = moduleOp.lookupSymbol<func::FuncOp>(functionName);
     
     if (!fcFunc) {
-      LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCulibsFullyConnectedForward declaration\n");
+      LLVM_DEBUG(llvm::dbgs() << "Creating " << functionName << " declaration\n");
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(moduleOp.getBody());
       
@@ -2344,7 +2008,7 @@ public:
       }, {});
       
       fcFunc = rewriter.create<func::FuncOp>(
-        loc, "mgpuCulibsFullyConnectedForward", fcFuncType);
+        loc, functionName, fcFuncType);
       fcFunc.setPrivate();
     }
     
@@ -2402,616 +2066,7 @@ public:
   }
 };
 
-// // Pattern to convert onnx.Flatten+onnx.Gemm to a call to mgpuCulibsFlattenFullyConnectedForward
-// class FlattenGemmOpLowering : public OpRewritePattern<mlir::ONNXGemmOp>, public ONNXToCuLibsPatternBase {
-// public:
-//   using OpRewritePattern<mlir::ONNXGemmOp>::OpRewritePattern;
-
-//   LogicalResult matchAndRewrite(mlir::ONNXGemmOp gemmOp, PatternRewriter &rewriter) const override {
-//     // First, check if the input to the Gemm is from a Flatten operation
-//     auto flattenOp = gemmOp.getA().getDefiningOp<mlir::ONNXFlattenOp>();
-//     if (!flattenOp) {
-//       // Not a Flatten->Gemm pattern, skip this operation
-//       return failure();
-//     }
-
-//     // Get the location for error reporting
-//     Location loc = gemmOp.getLoc();
-//     LLVM_DEBUG(llvm::dbgs() << "Converting onnx.Flatten+onnx.Gemm at " << loc << "\n");
-
-//     // Get the original input (before flattening)
-//     Value originalInput = flattenOp.getInput();
-//     Value weights = gemmOp.getB();
-//     Value bias = gemmOp.getC();
-    
-//     // Check that the Flatten has axis=1 (we only support that case)
-//     int64_t flattenAxis = 1;
-//     if (auto axisAttr = flattenOp.getAxisAttr()) {
-//       flattenAxis = axisAttr.getValue().getSExtValue();
-//     }
-    
-//     if (flattenAxis != 1) {
-//       return rewriter.notifyMatchFailure(flattenOp, "Only support flattening with axis=1");
-//     }
-    
-//     // Get the original input type
-//     auto inputType = mlir::dyn_cast<RankedTensorType>(originalInput.getType());
-//     if (!inputType || !inputType.hasStaticShape()) {
-//       return rewriter.notifyMatchFailure(flattenOp, "Input must have static shape");
-//     }
-    
-//     // Get input dimensions
-//     auto inputShape = inputType.getShape();
-//     if (inputShape.size() != 4) {
-//       return rewriter.notifyMatchFailure(flattenOp, "Only 4D NCHW inputs are supported for now");
-//     }
-    
-//     // Extract NCHW dimensions
-//     int64_t batchSize = inputShape[0];
-//     int64_t channels = inputShape[1];
-//     int64_t height = inputShape[2];
-//     int64_t width = inputShape[3];
-    
-//     // Calculate flattened features
-//     int64_t flattenedFeatures = channels * height * width;
-    
-//     // Get the weights type
-//     auto weightType = mlir::dyn_cast<RankedTensorType>(weights.getType());
-//     if (!weightType || !weightType.hasStaticShape()) {
-//       return rewriter.notifyMatchFailure(gemmOp, "Weights must have static shape");
-//     }
-    
-//     // Extract weight dimensions
-//     auto weightShape = weightType.getShape();
-//     if (weightShape.size() != 2) {
-//       return rewriter.notifyMatchFailure(gemmOp, "Weights must be 2D");
-//     }
-    
-//     // Check that the flattened dimension matches the weight input dimension
-//     if (flattenedFeatures != weightShape[0]) {
-//       return rewriter.notifyMatchFailure(gemmOp, "Flattened dimension doesn't match weight dimension");
-//     }
-    
-//     int64_t outputFeatures = weightShape[1];
-    
-//     // Get attributes from Gemm op
-//     float alpha = 1.0f;
-//     if (auto alphaAttr = dyn_cast_or_null<FloatAttr>(gemmOp.getAlphaAttr()))
-//       alpha = alphaAttr.getValueAsDouble();
-      
-//     float beta = 1.0f;
-//     if (auto betaAttr = dyn_cast_or_null<FloatAttr>(gemmOp.getBetaAttr()))
-//       beta = betaAttr.getValueAsDouble();
-    
-//     bool transA = false;
-//     if (auto transAAttr = gemmOp.getTransAAttr()) {
-//       if (auto intAttr = dyn_cast<IntegerAttr>(transAAttr)) {
-//         transA = intAttr.getValue().getSExtValue() != 0;
-//       }
-//     }
-
-//     bool transB = false;
-//     if (auto transBAttr = gemmOp.getTransBAttr()) {
-//       if (auto intAttr = dyn_cast<IntegerAttr>(transBAttr)) {
-//         transB = intAttr.getValue().getSExtValue() != 0;
-//       }
-//     }
-    
-//     // Check for unsupported attributes
-//     if (alpha != 1.0f) {
-//       return rewriter.notifyMatchFailure(gemmOp, "Alpha != 1.0 not supported yet");
-//     }
-    
-//     if (beta != 1.0f) {
-//       return rewriter.notifyMatchFailure(gemmOp, "Beta != 1.0 not supported yet");
-//     }
-    
-//     if (transA) {
-//       return rewriter.notifyMatchFailure(gemmOp, "TransA=1 not supported for flattened FC");
-//     }
-    
-//     if (transB) {
-//       return rewriter.notifyMatchFailure(gemmOp, "TransB=1 not supported for flattened FC");
-//     }
-    
-//     // Create constants for integer parameters
-//     auto i32Type = rewriter.getI32Type();
-//     auto createI32Const = [&](int64_t value) -> Value {
-//       return rewriter.create<arith::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(value));
-//     };
-    
-//     auto batchSizeValue = createI32Const(batchSize);
-//     auto channelsValue = createI32Const(channels);
-//     auto heightValue = createI32Const(height);
-//     auto widthValue = createI32Const(width);
-//     auto outputFeaturesValue = createI32Const(outputFeatures);
-    
-//     // Mark tensors for bufferization
-//     auto markForBufferization = [&](Value tensor) -> Value {
-//       if (!tensor)
-//         return nullptr;
-      
-//       auto tensorType = tensor.getType().cast<RankedTensorType>();
-//       auto memrefType = MemRefType::get(
-//         tensorType.getShape(),
-//         tensorType.getElementType());
-//       return rewriter.create<UnrealizedConversionCastOp>(
-//         loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
-//     };
-    
-//     auto inputMemref = markForBufferization(originalInput);
-//     auto weightMemref = markForBufferization(weights);
-//     auto biasMemref = markForBufferization(bias);
-    
-//     // Convert memrefs to void pointers
-//     auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-    
-//     auto getPtr = [&](Value memref) -> Value {
-//       if (!memref) {
-//         MultiDialectBuilder<LLVMBuilder> create(rewriter, loc);
-//         return create.llvm.null(ptrType);
-//       }
-      
-//       // Extract the aligned pointer as index
-//       auto indexType = rewriter.getIndexType();
-//       auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(loc, indexType, memref);
-      
-//       auto i64Type = rewriter.getIntegerType(64);
-//       auto ptrI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, ptrIndex);
-      
-//       return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrI64);
-//     };
-    
-//     auto inputPtr = getPtr(inputMemref);
-//     auto weightPtr = getPtr(weightMemref);
-//     Value biasPtr;
-//     if (biasMemref)
-//       biasPtr = getPtr(biasMemref);
-//     else {
-//       MultiDialectBuilder<LLVMBuilder> create(rewriter, loc);
-//       biasPtr = create.llvm.null(ptrType);
-//     }
-    
-//     // Allocate output memref
-//     auto outputType = mlir::dyn_cast<RankedTensorType>(gemmOp.getResult().getType());
-//     auto outputMemrefType = MemRefType::get(outputType.getShape(), outputType.getElementType());
-//     auto outputMemref = rewriter.create<memref::AllocOp>(loc, outputMemrefType);
-//     auto outputPtr = getPtr(outputMemref);
-    
-//     // Create a CUDA stream
-//     auto moduleOp = gemmOp->getParentOfType<ModuleOp>();
-//     // auto currentFunc = gemmOp->getParentOfType<func::FuncOp>();
-
-//     // ensureHandlePoolInitialization(moduleOp, rewriter, loc, ptrType, currentFunc);
-
-//     func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
-    
-//     if (!streamCreateFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-//       auto streamCreateType = rewriter.getFunctionType({}, {ptrType});
-//       streamCreateFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuStreamCreate", streamCreateType);
-//       streamCreateFunc.setPrivate();
-//     }
-
-//     func::FuncOp handleCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCreateHandlesForStream");
-
-//     if (!handleCreateFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-//       auto handleCreateType = rewriter.getFunctionType({ptrType}, {});
-//       handleCreateFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuCreateHandlesForStream", handleCreateType);
-//       handleCreateFunc.setPrivate();
-//     }
-    
-//     auto streamCallOp = rewriter.create<func::CallOp>(
-//       loc, TypeRange{ptrType}, streamCreateFunc.getName(), ValueRange{});
-//     auto streamPtr = streamCallOp.getResult(0);
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
-
-//     // 创建transB标志
-//     auto transBValue = createI32Const(transB ? 1 : 0);
-
-//     // Create or locate the flatten-FC function declaration
-//     func::FuncOp fcFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCulibsFlattenFullyConnectedForward");
-    
-//     if (!fcFunc) {
-//       LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCulibsFlattenFullyConnectedForward declaration\n");
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-//       auto fcFuncType = rewriter.getFunctionType({
-//         i32Type, i32Type, i32Type, i32Type,  // batch_size, channels, height, width
-//         i32Type,                             // output_features
-//         i32Type,                             // transB 标志
-//         ptrType, ptrType, ptrType,           // input_data, weight_data, bias_data
-//         ptrType,                             // output_data
-//         ptrType                              // stream
-//       }, {});
-      
-//       fcFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuCulibsFlattenFullyConnectedForward", fcFuncType);
-//       fcFunc.setPrivate();
-//     }
-    
-//     // Call the function
-//     std::vector<Value> args = {
-//       batchSizeValue, channelsValue, heightValue, widthValue,
-//       outputFeaturesValue,
-//       transBValue,  // 传递transB标志
-//       inputPtr, weightPtr, biasPtr,
-//       outputPtr, streamPtr
-//     };
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange(), fcFunc.getName(), ValueRange(args));
-    
-//     // Synchronize the stream
-//     func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
-    
-//     if (!streamSyncFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-//       auto streamSyncType = rewriter.getFunctionType({ptrType}, {});
-//       streamSyncFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuStreamSynchronize", streamSyncType);
-//       streamSyncFunc.setPrivate();
-//     }
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange(), streamSyncFunc.getName(), ValueRange{streamPtr});
-    
-//     // Destroy the stream
-//     func::FuncOp streamDestroyFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamDestroy");
-    
-//     if (!streamDestroyFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-//       auto streamDestroyType = rewriter.getFunctionType({ptrType}, {});
-//       streamDestroyFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuStreamDestroy", streamDestroyType);
-//       streamDestroyFunc.setPrivate();
-//     }
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange(), streamDestroyFunc.getName(), ValueRange{streamPtr});
-    
-//     // Convert memref back to tensor
-//     auto resultTensor = rewriter.create<UnrealizedConversionCastOp>(
-//         loc, TypeRange{outputType}, ValueRange{outputMemref}).getResult(0);
-    
-//     rewriter.replaceOp(gemmOp, resultTensor);
-    
-//     // The Flatten op will be removed automatically if it has no other uses
-//     if (flattenOp.use_empty())
-//       rewriter.eraseOp(flattenOp);
-    
-//     LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.Flatten+onnx.Gemm to FC call\n");
-//     return success();
-//   }
-// };
-
-// Pattern to convert onnx.Flatten+onnx.Gemm to a call to mgpuCulibsFlattenFullyConnectedForward
-class FlattenGemmOpLowering : public OpRewritePattern<mlir::ONNXGemmOp>, public ONNXToCuLibsPatternBase {
-public:
-  using OpRewritePattern<mlir::ONNXGemmOp>::OpRewritePattern;
-
-  LogicalResult matchAndRewrite(mlir::ONNXGemmOp gemmOp, PatternRewriter &rewriter) const override {
-    // First, check if the input to the Gemm is from a Flatten operation
-    auto flattenOp = gemmOp.getA().getDefiningOp<mlir::ONNXFlattenOp>();
-    if (!flattenOp) {
-      // Not a Flatten->Gemm pattern, skip this operation
-      return failure();
-    }
-
-    // Get the location for error reporting
-    Location loc = gemmOp.getLoc();
-    LLVM_DEBUG(llvm::dbgs() << "Converting onnx.Flatten+onnx.Gemm at " << loc << "\n");
-
-    // Get the original input (before flattening)
-    Value originalInput = flattenOp.getInput();
-    Value weights = gemmOp.getB();
-    Value bias = gemmOp.getC();
-    
-    // Check that the Flatten has axis=1 (we only support that case)
-    int64_t flattenAxis = 1;
-    if (auto axisAttr = flattenOp.getAxisAttr()) {
-      flattenAxis = axisAttr.getValue().getSExtValue();
-    }
-    
-    if (flattenAxis != 1) {
-      return rewriter.notifyMatchFailure(flattenOp, "Only support flattening with axis=1");
-    }
-    
-    // Get the original input type
-    auto inputType = mlir::dyn_cast<RankedTensorType>(originalInput.getType());
-    if (!inputType || !inputType.hasStaticShape()) {
-      return rewriter.notifyMatchFailure(flattenOp, "Input must have static shape");
-    }
-    
-    // Get input dimensions
-    auto inputShape = inputType.getShape();
-    if (inputShape.size() != 4) {
-      return rewriter.notifyMatchFailure(flattenOp, "Only 4D NCHW inputs are supported for now");
-    }
-    
-    // Extract NCHW dimensions
-    int64_t batchSize = inputShape[0];
-    int64_t channels = inputShape[1];
-    int64_t height = inputShape[2];
-    int64_t width = inputShape[3];
-    
-    // Calculate flattened features
-    int64_t flattenedFeatures = channels * height * width;
-    
-    // Get the weights type
-    auto weightType = mlir::dyn_cast<RankedTensorType>(weights.getType());
-    if (!weightType || !weightType.hasStaticShape()) {
-      return rewriter.notifyMatchFailure(gemmOp, "Weights must have static shape");
-    }
-    
-    // Extract weight dimensions
-    auto weightShape = weightType.getShape();
-    if (weightShape.size() != 2) {
-      return rewriter.notifyMatchFailure(gemmOp, "Weights must be 2D");
-    }
-    
-    // Get attributes from Gemm op
-    float alpha = 1.0f;
-    if (auto alphaAttr = dyn_cast_or_null<FloatAttr>(gemmOp.getAlphaAttr()))
-      alpha = alphaAttr.getValueAsDouble();
-      
-    float beta = 1.0f;
-    if (auto betaAttr = dyn_cast_or_null<FloatAttr>(gemmOp.getBetaAttr()))
-      beta = betaAttr.getValueAsDouble();
-    
-    bool transA = false;
-    if (auto transAAttr = gemmOp.getTransAAttr()) {
-      if (auto intAttr = dyn_cast<IntegerAttr>(transAAttr)) {
-        transA = intAttr.getValue().getSExtValue() != 0;
-      }
-    }
-
-    bool transB = false;
-    if (auto transBAttr = gemmOp.getTransBAttr()) {
-      if (auto intAttr = dyn_cast<IntegerAttr>(transBAttr)) {
-        transB = intAttr.getValue().getSExtValue() != 0;
-      }
-    }
-    
-    // Check for unsupported attributes
-    if (alpha != 1.0f) {
-      return rewriter.notifyMatchFailure(gemmOp, "Alpha != 1.0 not supported yet");
-    }
-    
-    if (beta != 1.0f) {
-      return rewriter.notifyMatchFailure(gemmOp, "Beta != 1.0 not supported yet");
-    }
-    
-    if (transA) {
-      return rewriter.notifyMatchFailure(gemmOp, "TransA=1 not supported for flattened FC");
-    }
-    
-    // 移除对transB的拒绝，因为我们现在支持transB
-    // if (transB) {
-    //   return rewriter.notifyMatchFailure(gemmOp, "TransB=1 not supported for flattened FC");
-    // }
-    
-    // 根据transB标志正确处理权重维度
-    int64_t weight_input_dim, weight_output_dim;
-    if (transB) {
-      // transB=1时，权重会被转置，所以原始权重格式为 [output_features, input_features]
-      weight_input_dim = weightShape[1];    // 转置后的输入维度
-      weight_output_dim = weightShape[0];   // 转置后的输出维度
-    } else {
-      // transB=0时，权重格式为 [input_features, output_features]
-      weight_input_dim = weightShape[0];
-      weight_output_dim = weightShape[1];
-    }
-    
-    // Check that the flattened dimension matches the weight input dimension
-    if (flattenedFeatures != weight_input_dim) {
-      return rewriter.notifyMatchFailure(gemmOp, "Flattened dimension doesn't match weight input dimension");
-    }
-    
-    int64_t outputFeatures = weight_output_dim;
-    
-    LLVM_DEBUG(llvm::dbgs() << "Flatten+Gemm dimensions: batchSize=" << batchSize 
-               << ", flattenedFeatures=" << flattenedFeatures 
-               << ", outputFeatures=" << outputFeatures 
-               << ", transB=" << transB << "\n");
-    
-    // Create constants for integer parameters
-    auto i32Type = rewriter.getI32Type();
-    auto createI32Const = [&](int64_t value) -> Value {
-      return rewriter.create<arith::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(value));
-    };
-    
-    auto batchSizeValue = createI32Const(batchSize);
-    auto channelsValue = createI32Const(channels);
-    auto heightValue = createI32Const(height);
-    auto widthValue = createI32Const(width);
-    auto outputFeaturesValue = createI32Const(outputFeatures);
-    
-    // 创建transB标志
-    auto transBValue = createI32Const(transB ? 1 : 0);
-    
-    // Mark tensors for bufferization
-    auto markForBufferization = [&](Value tensor) -> Value {
-      if (!tensor)
-        return nullptr;
-      
-      auto tensorType = tensor.getType().cast<RankedTensorType>();
-      auto memrefType = MemRefType::get(
-        tensorType.getShape(),
-        tensorType.getElementType());
-      return rewriter.create<UnrealizedConversionCastOp>(
-        loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
-    };
-    
-    auto inputMemref = markForBufferization(originalInput);
-    auto weightMemref = markForBufferization(weights);
-    auto biasMemref = markForBufferization(bias);
-    
-    // Convert memrefs to void pointers
-    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-    
-    auto getPtr = [&](Value memref) -> Value {
-      if (!memref) {
-        MultiDialectBuilder<LLVMBuilder> create(rewriter, loc);
-        return create.llvm.null(ptrType);
-      }
-      
-      // Extract the aligned pointer as index
-      auto indexType = rewriter.getIndexType();
-      auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(loc, indexType, memref);
-      
-      auto i64Type = rewriter.getIntegerType(64);
-      auto ptrI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, ptrIndex);
-      
-      return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrI64);
-    };
-    
-    auto inputPtr = getPtr(inputMemref);
-    auto weightPtr = getPtr(weightMemref);
-    Value biasPtr;
-    if (biasMemref)
-      biasPtr = getPtr(biasMemref);
-    else {
-      MultiDialectBuilder<LLVMBuilder> create(rewriter, loc);
-      biasPtr = create.llvm.null(ptrType);
-    }
-    
-    // Allocate output memref
-    auto outputType = mlir::dyn_cast<RankedTensorType>(gemmOp.getResult().getType());
-    auto outputMemrefType = MemRefType::get(outputType.getShape(), outputType.getElementType());
-    auto outputMemref = rewriter.create<memref::AllocOp>(loc, outputMemrefType);
-    auto outputPtr = getPtr(outputMemref);
-    
-    // Create a CUDA stream
-    auto moduleOp = gemmOp->getParentOfType<ModuleOp>();
-
-    func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
-    
-    if (!streamCreateFunc) {
-      OpBuilder::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-      auto streamCreateType = rewriter.getFunctionType({}, {ptrType});
-      streamCreateFunc = rewriter.create<func::FuncOp>(
-        loc, "mgpuStreamCreate", streamCreateType);
-      streamCreateFunc.setPrivate();
-    }
-
-    func::FuncOp handleCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCreateHandlesForStream");
-
-    if (!handleCreateFunc) {
-      OpBuilder::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-      auto handleCreateType = rewriter.getFunctionType({ptrType}, {});
-      handleCreateFunc = rewriter.create<func::FuncOp>(
-        loc, "mgpuCreateHandlesForStream", handleCreateType);
-      handleCreateFunc.setPrivate();
-    }
-    
-    auto streamCallOp = rewriter.create<func::CallOp>(
-      loc, TypeRange{ptrType}, streamCreateFunc.getName(), ValueRange{});
-    auto streamPtr = streamCallOp.getResult(0);
-    
-    rewriter.create<func::CallOp>(
-      loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
-
-    // Create or locate the flatten-FC function declaration
-    func::FuncOp fcFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCulibsFlattenFullyConnectedForward");
-    
-    if (!fcFunc) {
-      LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCulibsFlattenFullyConnectedForward declaration\n");
-      OpBuilder::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-      auto fcFuncType = rewriter.getFunctionType({
-        i32Type, i32Type, i32Type, i32Type,  // batch_size, channels, height, width
-        i32Type,                             // output_features
-        i32Type,                             // transB 标志
-        ptrType, ptrType, ptrType,           // input_data, weight_data, bias_data
-        ptrType,                             // output_data
-        ptrType                              // stream
-      }, {});
-      
-      fcFunc = rewriter.create<func::FuncOp>(
-        loc, "mgpuCulibsFlattenFullyConnectedForward", fcFuncType);
-      fcFunc.setPrivate();
-    }
-    
-    // Call the function
-    std::vector<Value> args = {
-      batchSizeValue, channelsValue, heightValue, widthValue,
-      outputFeaturesValue,
-      transBValue,  // 传递transB标志
-      inputPtr, weightPtr, biasPtr,
-      outputPtr, streamPtr
-    };
-    
-    rewriter.create<func::CallOp>(
-      loc, TypeRange(), fcFunc.getName(), ValueRange(args));
-    
-    // Synchronize the stream
-    func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
-    
-    if (!streamSyncFunc) {
-      OpBuilder::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-      auto streamSyncType = rewriter.getFunctionType({ptrType}, {});
-      streamSyncFunc = rewriter.create<func::FuncOp>(
-        loc, "mgpuStreamSynchronize", streamSyncType);
-      streamSyncFunc.setPrivate();
-    }
-    
-    rewriter.create<func::CallOp>(
-      loc, TypeRange(), streamSyncFunc.getName(), ValueRange{streamPtr});
-    
-    // Destroy the stream
-    func::FuncOp streamDestroyFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamDestroy");
-    
-    if (!streamDestroyFunc) {
-      OpBuilder::InsertionGuard guard(rewriter);
-      rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-      auto streamDestroyType = rewriter.getFunctionType({ptrType}, {});
-      streamDestroyFunc = rewriter.create<func::FuncOp>(
-        loc, "mgpuStreamDestroy", streamDestroyType);
-      streamDestroyFunc.setPrivate();
-    }
-    
-    rewriter.create<func::CallOp>(
-      loc, TypeRange(), streamDestroyFunc.getName(), ValueRange{streamPtr});
-    
-    // Convert memref back to tensor
-    auto resultTensor = rewriter.create<UnrealizedConversionCastOp>(
-        loc, TypeRange{outputType}, ValueRange{outputMemref}).getResult(0);
-    
-    rewriter.replaceOp(gemmOp, resultTensor);
-    
-    // The Flatten op will be removed automatically if it has no other uses
-    if (flattenOp.use_empty())
-      rewriter.eraseOp(flattenOp);
-    
-    LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.Flatten+onnx.Gemm to FC call\n");
-    return success();
-  }
-};
-
-// Pattern to convert onnx.Flatten+onnx.MatMul to a call to mgpuCulibsFlattenFullyConnectedForward
+// Pattern to convert onnx.Flatten+onnx.MatMul to a call to mgpuCulibsFlattenFullyConnectedForward[_fp16]
 class FlattenMatMulOpLowering : public OpRewritePattern<mlir::ONNXMatMulOp>, public ONNXToCuLibsPatternBase {
 public:
   using OpRewritePattern<mlir::ONNXMatMulOp>::OpRewritePattern;
@@ -3032,6 +2087,18 @@ public:
     Value originalInput = flattenOp.getInput();
     Value weights = matMulOp.getB();
     
+    // 获取元素类型并确定函数名后缀
+    auto inputType = mlir::dyn_cast<RankedTensorType>(originalInput.getType());
+    if (!inputType) {
+      return rewriter.notifyMatchFailure(flattenOp, "Input must be a ranked tensor");
+    }
+    
+    Type elementType = inputType.getElementType();
+    std::string functionSuffix = getFunctionSuffix(elementType);
+    std::string functionName = "mgpuCulibsFlattenFullyConnectedForward" + functionSuffix;
+    
+    LLVM_DEBUG(llvm::dbgs() << "Using function: " << functionName << " for element type: " << elementType << "\n");
+    
     // Check that the Flatten has axis=1 (we only support that case)
     int64_t flattenAxis = 1;
     if (auto axisAttr = flattenOp.getAxisAttr()) {
@@ -3043,7 +2110,6 @@ public:
     }
     
     // Get the original input type
-    auto inputType = mlir::dyn_cast<RankedTensorType>(originalInput.getType());
     if (!inputType || !inputType.hasStaticShape()) {
       return rewriter.notifyMatchFailure(flattenOp, "Input must have static shape");
     }
@@ -3144,9 +2210,6 @@ public:
     
     // Create a CUDA stream
     auto moduleOp = matMulOp->getParentOfType<ModuleOp>();
-    // auto currentFunc = matMulOp->getParentOfType<func::FuncOp>();
-
-    // ensureHandlePoolInitialization(moduleOp, rewriter, loc, ptrType, currentFunc);
 
     func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
     
@@ -3182,10 +2245,10 @@ public:
     auto transBValue = createI32Const(0);
 
     // Create or locate the flatten-FC function declaration
-    func::FuncOp fcFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCulibsFlattenFullyConnectedForward");
+    func::FuncOp fcFunc = moduleOp.lookupSymbol<func::FuncOp>(functionName);
     
     if (!fcFunc) {
-      LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCulibsFlattenFullyConnectedForward declaration\n");
+      LLVM_DEBUG(llvm::dbgs() << "Creating " << functionName << " declaration\n");
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(moduleOp.getBody());
       
@@ -3199,7 +2262,7 @@ public:
       }, {});
       
       fcFunc = rewriter.create<func::FuncOp>(
-        loc, "mgpuCulibsFlattenFullyConnectedForward", fcFuncType);
+        loc, functionName, fcFuncType);
       fcFunc.setPrivate();
     }
     
@@ -3262,7 +2325,7 @@ public:
   }
 };
 
-// Pattern to convert onnx.MaxPoolSingleOut to a call to mgpuCudnnMaxPoolForward
+// Pattern to convert onnx.MaxPoolSingleOut to a call to mgpuCudnnMaxPoolForward[_fp16]
 class MaxPoolOpLowering : public OpRewritePattern<mlir::ONNXMaxPoolSingleOutOp>, public ONNXToCuLibsPatternBase {
 public:
   using OpRewritePattern<mlir::ONNXMaxPoolSingleOutOp>::OpRewritePattern;
@@ -3280,6 +2343,13 @@ public:
     if (!inputType || !inputType.hasStaticShape()) {
       return rewriter.notifyMatchFailure(maxPoolOp, "Input must have static shape");
     }
+    
+    // 获取元素类型并确定函数名后缀
+    Type elementType = inputType.getElementType();
+    std::string functionSuffix = getFunctionSuffix(elementType);
+    std::string functionName = "mgpuCudnnMaxPoolForward" + functionSuffix;
+    
+    LLVM_DEBUG(llvm::dbgs() << "Using function: " << functionName << " for element type: " << elementType << "\n");
     
     // 获取输出类型
     auto outputType = mlir::dyn_cast<RankedTensorType>(maxPoolOp.getO_Y().getType());
@@ -3445,9 +2515,6 @@ public:
     
     // 创建CUDA流
     auto moduleOp = maxPoolOp->getParentOfType<ModuleOp>();
-    // auto currentFunc = maxPoolOp->getParentOfType<func::FuncOp>();
-
-    // ensureHandlePoolInitialization(moduleOp, rewriter, loc, ptrType, currentFunc);
 
     func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
     
@@ -3480,11 +2547,11 @@ public:
     rewriter.create<func::CallOp>(
       loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
     
-    // 查找或创建mgpuCudnnMaxPoolForward函数
-    func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>("mgpuCudnnMaxPoolForward");
+    // 查找或创建函数
+    func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>(functionName);
     
     if (!funcOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Creating mgpuCudnnMaxPoolForward declaration\n");
+      LLVM_DEBUG(llvm::dbgs() << "Creating " << functionName << " declaration\n");
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(moduleOp.getBody());
       
@@ -3500,7 +2567,7 @@ public:
       }, {});
       
       funcOp = rewriter.create<func::FuncOp>(
-        loc, "mgpuCudnnMaxPoolForward", funcType);
+        loc, functionName, funcType);
       funcOp.setPrivate();
     }
     
@@ -3561,700 +2628,7 @@ public:
   }
 };
 
-// // Pattern to convert onnx.Div to a call to mgpuCudnnMulScalar (with reciprocal) fp32
-// class DivOpLowering : public OpRewritePattern<mlir::ONNXDivOp>, public ONNXToCuLibsPatternBase {
-// public:
-//   using OpRewritePattern<mlir::ONNXDivOp>::OpRewritePattern;
-
-//   LogicalResult matchAndRewrite(mlir::ONNXDivOp divOp, PatternRewriter &rewriter) const override {
-//     Location loc = divOp.getLoc();
-//     LLVM_DEBUG(llvm::dbgs() << "Converting onnx.Div at " << loc << "\n");
-
-//     // 获取输入张量
-//     Value inputA = divOp.getA();
-//     Value inputB = divOp.getB();
-    
-//     LLVM_DEBUG(llvm::dbgs() << "Input A: " << inputA << "\n");
-//     LLVM_DEBUG(llvm::dbgs() << "Input A type: " << inputA.getType() << "\n");
-//     LLVM_DEBUG(llvm::dbgs() << "Input B: " << inputB << "\n");
-//     LLVM_DEBUG(llvm::dbgs() << "Input B type: " << inputB.getType() << "\n");
-    
-//     // 获取输入类型 - 修复：同时检查两个输入的类型
-//     auto inputTypeA = mlir::dyn_cast<RankedTensorType>(inputA.getType());
-//     auto inputTypeB = mlir::dyn_cast<RankedTensorType>(inputB.getType());
-    
-//     if (!inputTypeA || !inputTypeA.hasStaticShape()) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input A must have static shape\n");
-//       return rewriter.notifyMatchFailure(divOp, "Input A must have static shape");
-//     }
-    
-//     // 修复：添加对 inputB 类型的检查
-//     if (!inputTypeB || !inputTypeB.hasStaticShape()) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input B must have static shape\n");
-//       return rewriter.notifyMatchFailure(divOp, "Input B must have static shape");
-//     }
-    
-//     // 检查 inputB 是否为标量
-//     auto inputShapeB = inputTypeB.getShape();
-//     bool isScalar = inputShapeB.empty() || 
-//                    (inputShapeB.size() == 1 && inputShapeB[0] == 1) ||
-//                    (llvm::all_of(inputShapeB, [](int64_t dim) { return dim == 1; }));
-    
-//     if (!isScalar) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Only scalar division is supported\n");
-//       return rewriter.notifyMatchFailure(divOp, "Only scalar division is supported");
-//     }
-    
-//     LLVM_DEBUG(llvm::dbgs() << "Detected scalar division\n");
-    
-//     // 查找 inputB 的定义操作
-//     auto inputBDefOp = inputB.getDefiningOp();
-//     LLVM_DEBUG(llvm::dbgs() << "Input B defining op: " << (inputBDefOp ? inputBDefOp->getName().getStringRef() : "null") << "\n");
-    
-//     if (!inputBDefOp) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input B has no defining operation\n");
-//       return rewriter.notifyMatchFailure(divOp, "Input B has no defining operation");
-//     }
-    
-//     // 递归查找 krnl.global 操作
-//     std::function<Operation*(Value)> findKrnlGlobal = [&](Value val) -> Operation* {
-//       auto defOp = val.getDefiningOp();
-//       if (!defOp) {
-//         LLVM_DEBUG(llvm::dbgs() << "No defining operation for value\n");
-//         return nullptr;
-//       }
-      
-//       StringRef opName = defOp->getName().getStringRef();
-//       LLVM_DEBUG(llvm::dbgs() << "Checking operation: " << opName << "\n");
-      
-//       if (opName == "krnl.global") {
-//         return defOp;
-//       } else if (opName == "builtin.unrealized_conversion_cast") {
-//         auto castOp = mlir::dyn_cast<UnrealizedConversionCastOp>(defOp);
-//         if (castOp && castOp.getNumOperands() == 1) {
-//           LLVM_DEBUG(llvm::dbgs() << "Following unrealized_conversion_cast\n");
-//           return findKrnlGlobal(castOp.getOperand(0));
-//         }
-//       }
-//       LLVM_DEBUG(llvm::dbgs() << "Operation " << opName << " not recognized\n");
-//       return nullptr;
-//     };
-    
-//     Operation* krnlGlobalOp = findKrnlGlobal(inputB);
-    
-//     if (!krnlGlobalOp) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input B is not from krnl.global operation\n");
-//       return rewriter.notifyMatchFailure(divOp, "Input B must be from krnl.global operation");
-//     }
-    
-//     LLVM_DEBUG(llvm::dbgs() << "Found krnl.global operation: " << *krnlGlobalOp << "\n");
-    
-//     // 获取 krnl.global 的属性
-//     auto shapeAttr = krnlGlobalOp->getAttr("shape").dyn_cast<ArrayAttr>();
-//     auto valueAttr = krnlGlobalOp->getAttr("value").dyn_cast<DenseElementsAttr>();
-    
-//     if (!shapeAttr || !valueAttr) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: krnl.global missing shape or value attributes\n");
-//       return rewriter.notifyMatchFailure(divOp, "krnl.global must have shape and value attributes");
-//     }
-    
-//     // 检查是否为标量（shape为空）
-//     if (shapeAttr.size() != 0) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Not a scalar constant, shape size = " << shapeAttr.size() << "\n");
-//       return rewriter.notifyMatchFailure(divOp, "Only scalar constants are supported");
-//     }
-    
-//     // 提取标量值
-//     if (valueAttr.getNumElements() != 1) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Value is not a single element\n");
-//       return rewriter.notifyMatchFailure(divOp, "Value must be a single element");
-//     }
-    
-//     float scalarValue;
-//     if (valueAttr.getElementType().isF32()) {
-//       scalarValue = *valueAttr.getValues<float>().begin();
-//       LLVM_DEBUG(llvm::dbgs() << "Extracted scalar value: " << scalarValue << "\n");
-//     } else {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Not float32 type, element type: " << valueAttr.getElementType() << "\n");
-//       return rewriter.notifyMatchFailure(divOp, "Only float32 constants supported");
-//     }
-    
-//     // 检查除零错误
-//     if (scalarValue == 0.0f) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Division by zero\n");
-//       return rewriter.notifyMatchFailure(divOp, "Division by zero");
-//     }
-    
-//     // 计算倒数
-//     float reciprocalValue = 1.0f / scalarValue;
-//     LLVM_DEBUG(llvm::dbgs() << "Calculated reciprocal: " << reciprocalValue << "\n");
-    
-//     // 检查输入A的维度
-//     auto inputShapeA = inputTypeA.getShape();
-//     LLVM_DEBUG(llvm::dbgs() << "Input A shape dimensions: " << inputShapeA.size() << "\n");
-    
-//     if (inputShapeA.size() < 1 || inputShapeA.size() > 4) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input A dimensions must be 1D to 4D\n");
-//       return rewriter.notifyMatchFailure(divOp, "Input A must be 1D to 4D tensor");
-//     }
-    
-//     // 填充形状到4D (NCHW)
-//     std::vector<int64_t> paddedShapeA(4, 1);
-//     int offset = 4 - inputShapeA.size();
-//     for (size_t i = 0; i < inputShapeA.size(); ++i) {
-//       paddedShapeA[i + offset] = inputShapeA[i];
-//     }
-    
-//     int64_t n = paddedShapeA[0];
-//     int64_t c = paddedShapeA[1];
-//     int64_t h = paddedShapeA[2];
-//     int64_t w = paddedShapeA[3];
-    
-//     LLVM_DEBUG(llvm::dbgs() << "Padded dimensions: [" << n << "," << c << "," << h << "," << w << "]\n");
-    
-//     // 创建整数参数常量
-//     auto i32Type = rewriter.getI32Type();
-//     auto createI32Const = [&](int64_t value) -> Value {
-//       return rewriter.create<arith::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(value));
-//     };
-    
-//     auto nValue = createI32Const(n);
-//     auto cValue = createI32Const(c);
-//     auto hValue = createI32Const(h);
-//     auto wValue = createI32Const(w);
-    
-//     // 使用 memref.global 创建倒数常量
-//     auto f32Type = rewriter.getF32Type();
-//     auto moduleOp = divOp->getParentOfType<ModuleOp>();
-    
-//     // 生成唯一的全局变量名
-//     std::string globalName = "reciprocal_" + std::to_string(std::hash<float>{}(reciprocalValue));
-//     auto nameAttr = rewriter.getStringAttr(globalName);
-    
-//     // 检查是否已经存在相同的全局变量
-//     memref::GlobalOp existingGlobal = moduleOp.lookupSymbol<memref::GlobalOp>(globalName);
-//     memref::GlobalOp reciprocalGlobalOp;
-    
-//     if (!existingGlobal) {
-//       // 创建标量 memref 类型
-//       auto scalarMemrefType = MemRefType::get({}, f32Type);
-      
-//       // 创建标量张量类型和 DenseElementsAttr (memref.global 需要 DenseElementsAttr)
-//       auto scalarTensorType = RankedTensorType::get({}, f32Type);
-//       auto reciprocalAttr = DenseElementsAttr::get(scalarTensorType, reciprocalValue);
-      
-//       // 在模块开始处创建 memref.global
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-//       reciprocalGlobalOp = rewriter.create<memref::GlobalOp>(
-//           loc,
-//           nameAttr,                    // sym_name
-//           rewriter.getStringAttr("private"), // sym_visibility  
-//           scalarMemrefType,            // type
-//           reciprocalAttr,              // initial_value (must be DenseElementsAttr)
-//           /*constant=*/true,           // constant
-//           /*alignment=*/nullptr        // alignment
-//       );
-      
-//       LLVM_DEBUG(llvm::dbgs() << "Created memref.global for reciprocal: " << *reciprocalGlobalOp << "\n");
-//     } else {
-//       reciprocalGlobalOp = existingGlobal;
-//       LLVM_DEBUG(llvm::dbgs() << "Reusing existing memref.global for reciprocal\n");
-//     }
-    
-//     // 获取全局变量的引用 - 修改：插入到当前函数的最开始位置
-//     auto scalarMemrefType = MemRefType::get({}, f32Type);
-//     Value reciprocalRef;
-//     {
-//       // 获取当前函数
-//       auto funcOp = divOp->getParentOfType<func::FuncOp>();
-      
-//       // 临时改变插入位置到函数开始
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(&funcOp.getBody().front());
-      
-//       reciprocalRef = rewriter.create<memref::GetGlobalOp>(
-//           loc, scalarMemrefType, reciprocalGlobalOp.getSymName());
-      
-//       LLVM_DEBUG(llvm::dbgs() << "Created memref.get_global at function start\n");
-//     }
-    
-//     // 标记输入为缓冲区化
-//     auto markForBufferization = [&](Value tensor) -> Value {
-//       auto tensorType = tensor.getType().cast<RankedTensorType>();
-//       auto memrefType = MemRefType::get(
-//         tensorType.getShape(),
-//         tensorType.getElementType());
-//       return rewriter.create<UnrealizedConversionCastOp>(
-//         loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
-//     };
-    
-//     auto inputMemrefA = markForBufferization(inputA);
-    
-//     // 转换 memrefs 为 void pointers
-//     auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-    
-//     auto getPtr = [&](Value memref) -> Value {
-//       auto indexType = rewriter.getIndexType();
-//       auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(loc, indexType, memref);
-//       auto i64Type = rewriter.getIntegerType(64);
-//       auto ptrI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, ptrIndex);
-//       return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrI64);
-//     };
-    
-//     auto inputPtrA = getPtr(inputMemrefA);
-//     auto reciprocalPtr = getPtr(reciprocalRef);
-    
-//     // 分配输出 memref
-//     auto outputType = mlir::dyn_cast<RankedTensorType>(divOp.getResult().getType());
-//     auto outputMemrefType = MemRefType::get(outputType.getShape(), outputType.getElementType());
-//     auto outputMemref = rewriter.create<memref::AllocOp>(loc, outputMemrefType);
-//     auto outputPtr = getPtr(outputMemref);
-    
-//     // 创建CUDA流
-//     func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
-//     if (!streamCreateFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-//       auto streamCreateType = rewriter.getFunctionType({}, {ptrType});
-//       streamCreateFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuStreamCreate", streamCreateType);
-//       streamCreateFunc.setPrivate();
-//     }
-
-//     func::FuncOp handleCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCreateHandlesForStream");
-//     if (!handleCreateFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-//       auto handleCreateType = rewriter.getFunctionType({ptrType}, {});
-//       handleCreateFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuCreateHandlesForStream", handleCreateType);
-//       handleCreateFunc.setPrivate();
-//     }
-    
-//     auto streamCallOp = rewriter.create<func::CallOp>(
-//       loc, TypeRange{ptrType}, streamCreateFunc.getName(), ValueRange{});
-//     auto streamPtr = streamCallOp.getResult(0);
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
-
-//     // 使用标量乘法函数（用倒数实现除法）
-//     func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>("mgpuCudnnMulScalar");
-//     if (!funcOp) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-//       auto funcType = rewriter.getFunctionType({
-//         ptrType, ptrType, ptrType,  // input, scalar, output
-//         i32Type, i32Type, i32Type, i32Type,  // n, c, h, w
-//         ptrType  // stream
-//       }, {});
-//       funcOp = rewriter.create<func::FuncOp>(
-//         loc, "mgpuCudnnMulScalar", funcType);
-//       funcOp.setPrivate();
-//     }
-    
-//     // 调用函数 (inputA * reciprocal)
-//     std::vector<Value> args = {
-//       inputPtrA, reciprocalPtr, outputPtr,
-//       nValue, cValue, hValue, wValue,
-//       streamPtr
-//     };
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange(), funcOp.getName(), ValueRange(args));
-    
-//     // 同步并销毁流
-//     func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
-//     if (!streamSyncFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-//       auto streamSyncType = rewriter.getFunctionType({ptrType}, {});
-//       streamSyncFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuStreamSynchronize", streamSyncType);
-//       streamSyncFunc.setPrivate();
-//     }
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange(), streamSyncFunc.getName(), ValueRange{streamPtr});
-    
-//     func::FuncOp streamDestroyFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamDestroy");
-//     if (!streamDestroyFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-//       auto streamDestroyType = rewriter.getFunctionType({ptrType}, {});
-//       streamDestroyFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuStreamDestroy", streamDestroyType);
-//       streamDestroyFunc.setPrivate();
-//     }
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange(), streamDestroyFunc.getName(), ValueRange{streamPtr});
-    
-//     // 将 memref 转换回 tensor
-//     auto resultTensor = rewriter.create<UnrealizedConversionCastOp>(
-//         loc, TypeRange{outputType}, ValueRange{outputMemref}).getResult(0);
-    
-//     rewriter.replaceOp(divOp, resultTensor);
-    
-//     LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.Div to cuDNN MulScalar call\n");
-//     return success();
-//   }
-// };
-
-// // Pattern to convert onnx.Div to a call to mgpuCudnnMulScalar (with reciprocal) fp16
-// class DivOpLowering : public OpRewritePattern<mlir::ONNXDivOp>, public ONNXToCuLibsPatternBase {
-// public:
-//   using OpRewritePattern<mlir::ONNXDivOp>::OpRewritePattern;
-
-//   LogicalResult matchAndRewrite(mlir::ONNXDivOp divOp, PatternRewriter &rewriter) const override {
-//     Location loc = divOp.getLoc();
-//     LLVM_DEBUG(llvm::dbgs() << "Converting onnx.Div at " << loc << "\n");
-
-//     // 获取输入张量
-//     Value inputA = divOp.getA();
-//     Value inputB = divOp.getB();
-    
-//     LLVM_DEBUG(llvm::dbgs() << "Input A: " << inputA << "\n");
-//     LLVM_DEBUG(llvm::dbgs() << "Input A type: " << inputA.getType() << "\n");
-//     LLVM_DEBUG(llvm::dbgs() << "Input B: " << inputB << "\n");
-//     LLVM_DEBUG(llvm::dbgs() << "Input B type: " << inputB.getType() << "\n");
-    
-//     // 获取输入类型 - 修复：同时检查两个输入的类型
-//     auto inputTypeA = mlir::dyn_cast<RankedTensorType>(inputA.getType());
-//     auto inputTypeB = mlir::dyn_cast<RankedTensorType>(inputB.getType());
-    
-//     if (!inputTypeA || !inputTypeA.hasStaticShape()) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input A must have static shape\n");
-//       return rewriter.notifyMatchFailure(divOp, "Input A must have static shape");
-//     }
-    
-//     // 修复：添加对 inputB 类型的检查
-//     if (!inputTypeB || !inputTypeB.hasStaticShape()) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input B must have static shape\n");
-//       return rewriter.notifyMatchFailure(divOp, "Input B must have static shape");
-//     }
-    
-//     // 检查元素类型是否为 FP16
-//     Type elementType = inputTypeA.getElementType();
-//     if (!elementType.isF16()) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Only FP16 element type supported\n");
-//       return rewriter.notifyMatchFailure(divOp, "Only FP16 element type supported");
-//     }
-    
-//     LLVM_DEBUG(llvm::dbgs() << "Element type: FP16\n");
-    
-//     // 检查 inputB 是否为标量
-//     auto inputShapeB = inputTypeB.getShape();
-//     bool isScalar = inputShapeB.empty() || 
-//                    (inputShapeB.size() == 1 && inputShapeB[0] == 1) ||
-//                    (llvm::all_of(inputShapeB, [](int64_t dim) { return dim == 1; }));
-    
-//     if (!isScalar) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Only scalar division is supported\n");
-//       return rewriter.notifyMatchFailure(divOp, "Only scalar division is supported");
-//     }
-    
-//     LLVM_DEBUG(llvm::dbgs() << "Detected scalar division\n");
-    
-//     // 查找 inputB 的定义操作
-//     auto inputBDefOp = inputB.getDefiningOp();
-//     LLVM_DEBUG(llvm::dbgs() << "Input B defining op: " << (inputBDefOp ? inputBDefOp->getName().getStringRef() : "null") << "\n");
-    
-//     if (!inputBDefOp) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input B has no defining operation\n");
-//       return rewriter.notifyMatchFailure(divOp, "Input B has no defining operation");
-//     }
-    
-//     // 递归查找 krnl.global 操作
-//     std::function<Operation*(Value)> findKrnlGlobal = [&](Value val) -> Operation* {
-//       auto defOp = val.getDefiningOp();
-//       if (!defOp) {
-//         LLVM_DEBUG(llvm::dbgs() << "No defining operation for value\n");
-//         return nullptr;
-//       }
-      
-//       StringRef opName = defOp->getName().getStringRef();
-//       LLVM_DEBUG(llvm::dbgs() << "Checking operation: " << opName << "\n");
-      
-//       if (opName == "krnl.global") {
-//         return defOp;
-//       } else if (opName == "builtin.unrealized_conversion_cast") {
-//         auto castOp = mlir::dyn_cast<UnrealizedConversionCastOp>(defOp);
-//         if (castOp && castOp.getNumOperands() == 1) {
-//           LLVM_DEBUG(llvm::dbgs() << "Following unrealized_conversion_cast\n");
-//           return findKrnlGlobal(castOp.getOperand(0));
-//         }
-//       }
-//       LLVM_DEBUG(llvm::dbgs() << "Operation " << opName << " not recognized\n");
-//       return nullptr;
-//     };
-    
-//     Operation* krnlGlobalOp = findKrnlGlobal(inputB);
-    
-//     if (!krnlGlobalOp) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input B is not from krnl.global operation\n");
-//       return rewriter.notifyMatchFailure(divOp, "Input B must be from krnl.global operation");
-//     }
-    
-//     LLVM_DEBUG(llvm::dbgs() << "Found krnl.global operation: " << *krnlGlobalOp << "\n");
-    
-//     // 获取 krnl.global 的属性
-//     auto shapeAttr = krnlGlobalOp->getAttr("shape").dyn_cast<ArrayAttr>();
-//     auto valueAttr = krnlGlobalOp->getAttr("value").dyn_cast<DenseElementsAttr>();
-    
-//     if (!shapeAttr || !valueAttr) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: krnl.global missing shape or value attributes\n");
-//       return rewriter.notifyMatchFailure(divOp, "krnl.global must have shape and value attributes");
-//     }
-    
-//     // 检查是否为标量（shape为空）
-//     if (shapeAttr.size() != 0) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Not a scalar constant, shape size = " << shapeAttr.size() << "\n");
-//       return rewriter.notifyMatchFailure(divOp, "Only scalar constants are supported");
-//     }
-    
-//     // 提取标量值 - 直接使用 FP16
-//     if (valueAttr.getNumElements() != 1) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Value is not a single element\n");
-//       return rewriter.notifyMatchFailure(divOp, "Value must be a single element");
-//     }
-    
-//     APFloat scalarValue = *valueAttr.getValues<APFloat>().begin();
-//     LLVM_DEBUG(llvm::dbgs() << "Extracted F16 scalar value: " << scalarValue.convertToFloat() << "\n");
-    
-//     // 检查除零错误
-//     if (scalarValue.isZero()) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Division by zero\n");
-//       return rewriter.notifyMatchFailure(divOp, "Division by zero");
-//     }
-    
-//     // 计算倒数 - 在 FP16 精度下
-//     APFloat reciprocalValue = APFloat::getOne(APFloat::IEEEhalf());
-//     auto divResult = reciprocalValue.divide(scalarValue, APFloat::rmNearestTiesToEven);
-//     if (divResult != APFloat::opOK) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Division operation failed\n");
-//       return rewriter.notifyMatchFailure(divOp, "Reciprocal calculation failed");
-//     }
-    
-//     LLVM_DEBUG(llvm::dbgs() << "Calculated reciprocal: " << reciprocalValue.convertToFloat() << "\n");
-    
-//     // 检查输入A的维度
-//     auto inputShapeA = inputTypeA.getShape();
-//     LLVM_DEBUG(llvm::dbgs() << "Input A shape dimensions: " << inputShapeA.size() << "\n");
-    
-//     if (inputShapeA.size() < 1 || inputShapeA.size() > 4) {
-//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input A dimensions must be 1D to 4D\n");
-//       return rewriter.notifyMatchFailure(divOp, "Input A must be 1D to 4D tensor");
-//     }
-    
-//     // 填充形状到4D (NCHW)
-//     std::vector<int64_t> paddedShapeA(4, 1);
-//     int offset = 4 - inputShapeA.size();
-//     for (size_t i = 0; i < inputShapeA.size(); ++i) {
-//       paddedShapeA[i + offset] = inputShapeA[i];
-//     }
-    
-//     int64_t n = paddedShapeA[0];
-//     int64_t c = paddedShapeA[1];
-//     int64_t h = paddedShapeA[2];
-//     int64_t w = paddedShapeA[3];
-    
-//     LLVM_DEBUG(llvm::dbgs() << "Padded dimensions: [" << n << "," << c << "," << h << "," << w << "]\n");
-    
-//     // 创建整数参数常量
-//     auto i32Type = rewriter.getI32Type();
-//     auto createI32Const = [&](int64_t value) -> Value {
-//       return rewriter.create<arith::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(value));
-//     };
-    
-//     auto nValue = createI32Const(n);
-//     auto cValue = createI32Const(c);
-//     auto hValue = createI32Const(h);
-//     auto wValue = createI32Const(w);
-    
-//     // 使用 memref.global 创建倒数常量 - 修改：使用 FP16 类型
-//     auto f16Type = rewriter.getF16Type();
-//     auto moduleOp = divOp->getParentOfType<ModuleOp>();
-    
-//     // 生成唯一的全局变量名
-//     std::string globalName = "reciprocal_" + std::to_string(std::hash<float>{}(reciprocalValue.convertToFloat())) + "_fp16";
-//     auto nameAttr = rewriter.getStringAttr(globalName);
-    
-//     // 检查是否已经存在相同的全局变量
-//     memref::GlobalOp existingGlobal = moduleOp.lookupSymbol<memref::GlobalOp>(globalName);
-//     memref::GlobalOp reciprocalGlobalOp;
-    
-//     if (!existingGlobal) {
-//       // 创建标量 memref 类型
-//       auto scalarMemrefType = MemRefType::get({}, f16Type);
-      
-//       // 创建标量张量类型和 DenseElementsAttr (memref.global 需要 DenseElementsAttr)
-//       auto scalarTensorType = RankedTensorType::get({}, f16Type);
-//       auto reciprocalAttr = DenseElementsAttr::get(scalarTensorType, reciprocalValue);
-      
-//       // 在模块开始处创建 memref.global
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-      
-//       reciprocalGlobalOp = rewriter.create<memref::GlobalOp>(
-//           loc,
-//           nameAttr,                    // sym_name
-//           rewriter.getStringAttr("private"), // sym_visibility  
-//           scalarMemrefType,            // type
-//           reciprocalAttr,              // initial_value (must be DenseElementsAttr)
-//           /*constant=*/true,           // constant
-//           /*alignment=*/nullptr        // alignment
-//       );
-      
-//       LLVM_DEBUG(llvm::dbgs() << "Created memref.global for reciprocal: " << *reciprocalGlobalOp << "\n");
-//     } else {
-//       reciprocalGlobalOp = existingGlobal;
-//       LLVM_DEBUG(llvm::dbgs() << "Reusing existing memref.global for reciprocal\n");
-//     }
-    
-//     // 获取全局变量的引用 - 修改：插入到当前函数的最开始位置
-//     auto scalarMemrefType = MemRefType::get({}, f16Type);
-//     Value reciprocalRef;
-//     {
-//       // 获取当前函数
-//       auto funcOp = divOp->getParentOfType<func::FuncOp>();
-      
-//       // 临时改变插入位置到函数开始
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(&funcOp.getBody().front());
-      
-//       reciprocalRef = rewriter.create<memref::GetGlobalOp>(
-//           loc, scalarMemrefType, reciprocalGlobalOp.getSymName());
-      
-//       LLVM_DEBUG(llvm::dbgs() << "Created memref.get_global at function start\n");
-//     }
-    
-//     // 标记输入为缓冲区化
-//     auto markForBufferization = [&](Value tensor) -> Value {
-//       auto tensorType = tensor.getType().cast<RankedTensorType>();
-//       auto memrefType = MemRefType::get(
-//         tensorType.getShape(),
-//         tensorType.getElementType());
-//       return rewriter.create<UnrealizedConversionCastOp>(
-//         loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
-//     };
-    
-//     auto inputMemrefA = markForBufferization(inputA);
-    
-//     // 转换 memrefs 为 void pointers
-//     auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-    
-//     auto getPtr = [&](Value memref) -> Value {
-//       auto indexType = rewriter.getIndexType();
-//       auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(loc, indexType, memref);
-//       auto i64Type = rewriter.getIntegerType(64);
-//       auto ptrI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, ptrIndex);
-//       return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrI64);
-//     };
-    
-//     auto inputPtrA = getPtr(inputMemrefA);
-//     auto reciprocalPtr = getPtr(reciprocalRef);
-    
-//     // 分配输出 memref
-//     auto outputType = mlir::dyn_cast<RankedTensorType>(divOp.getResult().getType());
-//     auto outputMemrefType = MemRefType::get(outputType.getShape(), outputType.getElementType());
-//     auto outputMemref = rewriter.create<memref::AllocOp>(loc, outputMemrefType);
-//     auto outputPtr = getPtr(outputMemref);
-    
-//     // 创建CUDA流
-//     func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
-//     if (!streamCreateFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-//       auto streamCreateType = rewriter.getFunctionType({}, {ptrType});
-//       streamCreateFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuStreamCreate", streamCreateType);
-//       streamCreateFunc.setPrivate();
-//     }
-
-//     func::FuncOp handleCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCreateHandlesForStream");
-//     if (!handleCreateFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-//       auto handleCreateType = rewriter.getFunctionType({ptrType}, {});
-//       handleCreateFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuCreateHandlesForStream", handleCreateType);
-//       handleCreateFunc.setPrivate();
-//     }
-    
-//     auto streamCallOp = rewriter.create<func::CallOp>(
-//       loc, TypeRange{ptrType}, streamCreateFunc.getName(), ValueRange{});
-//     auto streamPtr = streamCallOp.getResult(0);
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
-
-//     // 使用标量乘法函数（用倒数实现除法）
-//     func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>("mgpuCudnnMulScalar");
-//     if (!funcOp) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-//       auto funcType = rewriter.getFunctionType({
-//         ptrType, ptrType, ptrType,  // input, scalar, output
-//         i32Type, i32Type, i32Type, i32Type,  // n, c, h, w
-//         ptrType  // stream
-//       }, {});
-//       funcOp = rewriter.create<func::FuncOp>(
-//         loc, "mgpuCudnnMulScalar", funcType);
-//       funcOp.setPrivate();
-//     }
-    
-//     // 调用函数 (inputA * reciprocal)
-//     std::vector<Value> args = {
-//       inputPtrA, reciprocalPtr, outputPtr,
-//       nValue, cValue, hValue, wValue,
-//       streamPtr
-//     };
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange(), funcOp.getName(), ValueRange(args));
-    
-//     // 同步并销毁流
-//     func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
-//     if (!streamSyncFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-//       auto streamSyncType = rewriter.getFunctionType({ptrType}, {});
-//       streamSyncFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuStreamSynchronize", streamSyncType);
-//       streamSyncFunc.setPrivate();
-//     }
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange(), streamSyncFunc.getName(), ValueRange{streamPtr});
-    
-//     func::FuncOp streamDestroyFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamDestroy");
-//     if (!streamDestroyFunc) {
-//       OpBuilder::InsertionGuard guard(rewriter);
-//       rewriter.setInsertionPointToStart(moduleOp.getBody());
-//       auto streamDestroyType = rewriter.getFunctionType({ptrType}, {});
-//       streamDestroyFunc = rewriter.create<func::FuncOp>(
-//         loc, "mgpuStreamDestroy", streamDestroyType);
-//       streamDestroyFunc.setPrivate();
-//     }
-    
-//     rewriter.create<func::CallOp>(
-//       loc, TypeRange(), streamDestroyFunc.getName(), ValueRange{streamPtr});
-    
-//     // 将 memref 转换回 tensor
-//     auto resultTensor = rewriter.create<UnrealizedConversionCastOp>(
-//         loc, TypeRange{outputType}, ValueRange{outputMemref}).getResult(0);
-    
-//     rewriter.replaceOp(divOp, resultTensor);
-    
-//     LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.Div to cuDNN MulScalar call\n");
-//     return success();
-//   }
-// };
-
-// Pattern to convert onnx.Div to a call to mgpuCudnnMulScalar (with reciprocal) for both fp32 and fp16
+// Pattern to convert onnx.Div to a call to mgpuCudnnMulScalar[_fp16] (with reciprocal) for both fp32 and fp16
 class DivOpLowering : public OpRewritePattern<mlir::ONNXDivOp>, public ONNXToCuLibsPatternBase {
 public:
   using OpRewritePattern<mlir::ONNXDivOp>::OpRewritePattern;
@@ -4297,7 +2671,12 @@ public:
       return rewriter.notifyMatchFailure(divOp, "Only FP32 and FP16 element types supported");
     }
     
+    // 获取函数名后缀
+    std::string functionSuffix = getFunctionSuffix(elementType);
+    std::string functionName = "mgpuCudnnMulScalar" + functionSuffix;
+    
     LLVM_DEBUG(llvm::dbgs() << "Element type: " << (isFP32 ? "FP32" : "FP16") << "\n");
+    LLVM_DEBUG(llvm::dbgs() << "Using function: " << functionName << "\n");
     
     // 检查 inputB 是否为标量
     auto inputShapeB = inputTypeB.getShape();
@@ -4602,7 +2981,7 @@ public:
       loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
 
     // 使用标量乘法函数（用倒数实现除法）
-    func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>("mgpuCudnnMulScalar");
+    func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>(functionName);
     if (!funcOp) {
       OpBuilder::InsertionGuard guard(rewriter);
       rewriter.setInsertionPointToStart(moduleOp.getBody());
@@ -4612,7 +2991,7 @@ public:
         ptrType  // stream
       }, {});
       funcOp = rewriter.create<func::FuncOp>(
-        loc, "mgpuCudnnMulScalar", funcType);
+        loc, functionName, funcType);
       funcOp.setPrivate();
     }
     
