@@ -44,6 +44,33 @@ func::FuncOp ensureDescriptorReturnFuncDecl(ModuleOp moduleOp, OpBuilder& builde
   return funcOp;
 }
 
+func::FuncOp ensureWorkspaceReturnFuncDecl(ModuleOp moduleOp, OpBuilder& builder) {
+  const char* funcName = "mgpuReturnAllActiveWorkspaces";
+  
+  // Check if function already exists
+  if (auto existingFunc = moduleOp.lookupSymbol<func::FuncOp>(funcName)) {
+    return existingFunc;
+  }
+  
+  // Create function type: () -> ()
+  auto funcType = builder.getFunctionType(TypeRange{}, TypeRange{});
+  
+  // Insert at the beginning of the module
+  OpBuilder::InsertionGuard guard(builder);
+  builder.setInsertionPointToStart(moduleOp.getBody());
+  
+  // Create function declaration
+  auto funcOp = builder.create<func::FuncOp>(
+      moduleOp.getLoc(),
+      funcName,
+      funcType);
+  
+  // Mark as external function (declaration only)
+  funcOp.setPrivate();
+  
+  return funcOp;
+}
+
 // Helper function to insert descriptor return call
 void insertDescriptorReturnCall(OpBuilder& builder, Location loc, 
                                func::FuncOp descriptorReturnFunc) {
@@ -56,466 +83,17 @@ void insertDescriptorReturnCall(OpBuilder& builder, Location loc,
   );
 }
 
-// 简化方案：所有级别都使用显式同步，删除链式令牌逻辑
-// void reorganizeIR(func::FuncOp funcOp, DependencyGraph &graph) {
-//   OpBuilder builder(funcOp.getContext());
-  
-//   // 安全检查：确保函数体不为空
-//   if (funcOp.getBody().empty()) {
-//     llvm::errs() << "Warning: Function body is empty, skipping reorganization\n";
-//     return;
-//   }
-  
-//   // Get the module to ensure function declarations
-//   ModuleOp moduleOp = funcOp->getParentOfType<ModuleOp>();
-//   if (!moduleOp) {
-//     llvm::errs() << "Error: Cannot find parent module for function\n";
-//     return;
-//   }
-  
-//   // Ensure mgpuReturnAllActiveDescriptors function declaration exists
-//   func::FuncOp descriptorReturnFunc = ensureDescriptorReturnFuncDecl(moduleOp, builder);
-
-//   // 创建映射以跟踪操作映射关系
-//   IRMapping mapper;
-  
-//   // 按拓扑级别分组节点
-//   std::map<unsigned, llvm::SmallVector<DependencyNode*, 8>> nodesByLevel;
-//   for (const auto &nodePair : graph.nodes) {
-//     DependencyNode* node = nodePair.get();
-//     nodesByLevel[node->topologicalLevel].push_back(node);
-//   }
-  
-//   // 如果没有节点需要处理，直接返回
-//   if (nodesByLevel.empty()) {
-//     llvm::errs() << "Warning: No nodes to reorganize, skipping\n";
-//     return;
-//   }
-  
-//   // 创建新块
-//   Block* oldBlock = &funcOp.getBody().front();
-//   Block* newBlock = new Block();
-  
-//   // 映射参数
-//   for (auto &blockArg : oldBlock->getArguments()) {
-//     auto newArg = newBlock->addArgument(blockArg.getType(), blockArg.getLoc());
-//     mapper.map(blockArg, newArg);
-//   }
-  
-//   // 跟踪已处理的操作
-//   llvm::DenseSet<Operation*> processedOps;
-  
-//   // 收集所有alloca操作，需要在使用前放置
-//   llvm::SmallVector<Operation*, 16> allocaOps;
-//   funcOp.walk([&](memref::AllocaOp allocaOp) {
-//     allocaOps.push_back(allocaOp);
-//   });
-  
-//   // 预先分析所有GPU wait操作的使用情况
-//   llvm::DenseMap<Operation*, bool> waitOpShouldKeep;
-//   // funcOp.walk([&](gpu::WaitOp waitOp) {
-//   //   bool usedByNonGraphOps = false;
-//   //   for (auto user : waitOp->getUsers()) {
-//   //     if (!graph.opToNodeMap.count(user)) {
-//   //       usedByNonGraphOps = true;
-//   //       break;
-//   //     }
-//   //   }
-//   //   waitOpShouldKeep[waitOp] = usedByNonGraphOps;
-//   // });
-//   funcOp.walk([&](gpu::WaitOp waitOp) {
-//     // 区分异步和同步wait操作
-//     bool isAsyncWait = waitOp.getAsyncToken() != nullptr;
-//     bool isSyncWait = !waitOp.getAsyncDependencies().empty() && !isAsyncWait;
-    
-//     if (isSyncWait) {
-//       // 同步wait操作（如 gpu.wait [%token]）应该保留
-//       // 这些是用于同步异步操作的关键同步点
-//       waitOpShouldKeep[waitOp] = true;
-//     } else if (isAsyncWait) {
-//       // 异步wait操作（如 %token = gpu.wait async）
-//       // 检查是否被非图节点使用
-//       bool usedByNonGraphOps = false;
-//       for (auto user : waitOp->getUsers()) {
-//         if (!graph.opToNodeMap.count(user)) {
-//           usedByNonGraphOps = true;
-//           break;
-//         }
-//       }
-//       waitOpShouldKeep[waitOp] = usedByNonGraphOps;
-//     } else {
-//       // 其他类型的wait操作，保守起见保留
-//       waitOpShouldKeep[waitOp] = true;
-//     }
-//   });
-
-  
-//   // 阶段1：首先复制非图节点前缀操作
-//   for (auto &op : oldBlock->getOperations()) {
-//     if (graph.opToNodeMap.count(&op)) {
-//       // 当遇到图中的节点时停止复制前缀操作
-//       break;
-//     }
-    
-//     // 记录所有alloca操作，稍后一起处理
-//     if (isa<memref::AllocaOp>(op)) {
-//       processedOps.insert(&op);
-//       continue;
-//     }
-    
-//     // 对于GPU wait操作，根据预分析结果决定是否保留
-//     if (auto waitOp = dyn_cast<gpu::WaitOp>(op)) {
-//       if (waitOpShouldKeep[waitOp]) {
-//         Operation *newOp = op.clone(mapper);
-//         newBlock->push_back(newOp);
-        
-//         // 更新映射
-//         for (unsigned i = 0; i < op.getNumResults(); ++i) {
-//           mapper.map(op.getResult(i), newOp->getResult(i));
-//         }
-//       }
-//       processedOps.insert(&op);
-//       continue;
-//     }
-    
-//     Operation *newOp = op.clone(mapper);
-//     newBlock->push_back(newOp);
-    
-//     // 更新映射并标记为已处理
-//     for (unsigned i = 0; i < op.getNumResults(); ++i) {
-//       mapper.map(op.getResult(i), newOp->getResult(i));
-//     }
-//     processedOps.insert(&op);
-//   }
-  
-//   // 找到最大拓扑级别
-//   unsigned maxLevel = 0;
-//   for (const auto &nodePair : graph.nodes) {
-//     maxLevel = std::max(maxLevel, nodePair.get()->topologicalLevel);
-//   }
-  
-//   // 用于跟踪前一级别的令牌（仅用于gpu.launch_func）
-//   llvm::SmallVector<Value, 8> previousLevelTokens;
-  
-//   // 阶段2：按拓扑级别处理节点 - 统一使用显式同步方案
-//   for (unsigned level = 1; level <= maxLevel; level++) {
-//     auto levelIt = nodesByLevel.find(level);
-//     if (levelIt == nodesByLevel.end() || levelIt->second.empty())
-//       continue;
-      
-//     auto &nodesAtLevel = levelIt->second;
-    
-//     // === 统一的显式同步方案 ===
-    
-//     // 步骤1：如果有前一级别的令牌，添加同步点
-//     if (!previousLevelTokens.empty()) {
-//       builder.setInsertionPointToEnd(newBlock);
-      
-//       // 显式等待所有前一级别操作完成
-//       builder.create<gpu::WaitOp>(funcOp.getLoc(), TypeRange{}, previousLevelTokens);
-
-//       // *** 新增：在前一级别同步完成后，归还描述符 ***
-//       insertDescriptorReturnCall(builder, funcOp.getLoc(), descriptorReturnFunc);
-//     }
-    
-//     // 步骤2：为当前级别的所有CuLibs节点创建streams
-//     llvm::SmallVector<Value, 8> culibsStreams;
-//     for (auto node : nodesAtLevel) {
-//       if (node->type == NodeType::CuLibs) {
-//         builder.setInsertionPointToEnd(newBlock);
-        
-//         // 创建stream
-//         auto streamCreateOp = builder.create<func::CallOp>(
-//             funcOp.getLoc(),
-//             "mgpuStreamCreate",
-//             TypeRange{LLVM::LLVMPointerType::get(builder.getContext())},
-//             ValueRange{});
-//         culibsStreams.push_back(streamCreateOp.getResult(0));
-
-//         // 创建handles for stream
-//         builder.create<func::CallOp>(
-//           funcOp.getLoc(),
-//           "mgpuCreateHandlesForStream",
-//           TypeRange{},
-//           ValueRange{streamCreateOp.getResult(0)});
-//       }
-//     }
-    
-//     // 步骤3：为当前级别的所有kernels创建独立的异步令牌
-//     llvm::SmallVector<Value, 8> kernelWaitTokens;
-//     llvm::SmallVector<Value, 8> currentLevelTokens;
-    
-//     // 计算kernel数量
-//     unsigned kernelCount = 0;
-//     for (auto node : nodesAtLevel) {
-//       if (node->type == NodeType::Kernel) {
-//         kernelCount++;
-//       }
-//     }
-    
-//     // 为每个kernel创建独立的异步令牌
-//     for (unsigned i = 0; i < kernelCount; i++) {
-//       builder.setInsertionPointToEnd(newBlock);
-      
-//       // 创建独立的异步等待操作
-//       auto waitOp = builder.create<gpu::WaitOp>(
-//           funcOp.getLoc(),
-//           builder.getType<gpu::AsyncTokenType>(),
-//           ValueRange{});  // 无依赖，创建新的异步令牌
-          
-//       kernelWaitTokens.push_back(waitOp.getAsyncToken());
-//     }
-    
-//     // 步骤4：处理当前级别的所有节点
-//     // unsigned kernelIndex = 0;
-//     // unsigned culibsIndex = 0;
-    
-//     // for (auto node : nodesAtLevel) {
-//     //   builder.setInsertionPointToEnd(newBlock);
-      
-//     //   if (node->type == NodeType::Kernel) {
-//     //     Value waitToken = kernelWaitTokens[kernelIndex++];
-//     //     Value kernelToken = processKernelNode(node, builder, mapper, waitToken, processedOps);
-//     //     currentLevelTokens.push_back(kernelToken);
-//     //   } 
-//     //   else if (node->type == NodeType::Loop) {
-//     //     processLoopNode(node, builder, mapper, allocaOps, processedOps);
-//     //   } 
-//     //   else if (node->type == NodeType::CuLibs) {
-//     //     Value stream = culibsStreams[culibsIndex++];
-//     //     processCuLibsNodeWithStream(node, builder, mapper, processedOps, stream);
-//     //   }
-//     // }
-    
-//     // 对当前级别的节点进行排序：Kernel 节点优先
-//     llvm::SmallVector<DependencyNode*, 8> sortedNodes;
-//     llvm::SmallVector<DependencyNode*, 8> kernelNodes;
-//     llvm::SmallVector<DependencyNode*, 8> loopNodes;  
-//     llvm::SmallVector<DependencyNode*, 8> culibsNodes;
-
-//     // 分离不同类型的节点
-//     for (auto node : nodesAtLevel) {
-//       switch (node->type) {
-//         case NodeType::Kernel:
-//           kernelNodes.push_back(node);
-//           break;
-//         case NodeType::Loop:
-//           loopNodes.push_back(node);
-//           break;
-//         case NodeType::CuLibs:
-//           culibsNodes.push_back(node);
-//           break;
-//         default:
-//           // 处理未知类型，保守地放在最后
-//           llvm::errs() << "Warning: Unknown node type encountered\n";
-//           break;
-//       }
-//     }
-
-//     // 按优先级排序：Kernel > Loop > CuLibs
-//     // Kernel 节点优先，因为它们通常执行时间更长，先启动可以获得更好的并行效果
-//     sortedNodes.append(kernelNodes.begin(), kernelNodes.end());
-//     sortedNodes.append(loopNodes.begin(), loopNodes.end());
-//     sortedNodes.append(culibsNodes.begin(), culibsNodes.end());
-
-//     // llvm::errs() << "Level " << level << " execution order optimization: " 
-//     //              << kernelNodes.size() << " kernels first, then " 
-//     //              << loopNodes.size() << " loops, then " 
-//     //              << culibsNodes.size() << " culibs calls\n";
-
-//     unsigned kernelIndex = 0;
-//     unsigned culibsIndex = 0;
-
-//     // 按排序后的顺序处理节点
-//     for (auto node : sortedNodes) {
-//       builder.setInsertionPointToEnd(newBlock);
-      
-//       if (node->type == NodeType::Kernel) {
-//         Value waitToken = kernelWaitTokens[kernelIndex++];
-//         Value kernelToken = processKernelNode(node, builder, mapper, waitToken, processedOps);
-//         currentLevelTokens.push_back(kernelToken);
-        
-//         // llvm::errs() << "  Processed kernel: " << node->kernelModuleName 
-//         //              << "::" << node->kernelName << " (index " << (kernelIndex-1) << ")\n";
-//       } 
-//       else if (node->type == NodeType::Loop) {
-//         processLoopNode(node, builder, mapper, allocaOps, processedOps);
-        
-//         // llvm::errs() << "  Processed loop node\n";
-//       } 
-//       else if (node->type == NodeType::CuLibs) {
-//         Value stream = culibsStreams[culibsIndex++];
-//         processCuLibsNodeWithStream(node, builder, mapper, processedOps, stream);
-        
-//         // llvm::errs() << "  Processed culibs call: " << node->culibsFunctionName 
-//         //              << " (index " << (culibsIndex-1) << ")\n";
-//       }
-//     }
-
-//     // 步骤5：同步和销毁所有streams
-//     for (Value stream : culibsStreams) {
-//       builder.setInsertionPointToEnd(newBlock);
-      
-//       // 同步stream
-//       builder.create<func::CallOp>(
-//           funcOp.getLoc(),
-//           "mgpuStreamSynchronize",
-//           TypeRange{},
-//           ValueRange{stream});
-      
-//       // 销毁stream
-//       builder.create<func::CallOp>(
-//           funcOp.getLoc(),
-//           "mgpuStreamDestroy", 
-//           TypeRange{},
-//           ValueRange{stream});
-//     }
-    
-//     // 步骤6：级别完成后的同步处理
-//     if (!currentLevelTokens.empty()) {
-//       // 如果不是最后一级，添加显式同步点
-//       if (level < maxLevel) {
-//         builder.setInsertionPointToEnd(newBlock);
-        
-//         // 添加显式同步点等待此级别所有kernel完成
-//         builder.create<gpu::WaitOp>(funcOp.getLoc(), TypeRange{}, currentLevelTokens);
-        
-//         // *** 新增：当前级别同步完成后，归还描述符 ***
-//         insertDescriptorReturnCall(builder, funcOp.getLoc(), descriptorReturnFunc);
-
-//         // 清空令牌，下一级别将创建新的独立令牌
-//         currentLevelTokens.clear();
-//       }
-//     }
-    
-//     // 更新前一级别令牌用于下一级别
-//     previousLevelTokens = currentLevelTokens;
-//   }
-  
-//   // 处理剩余未使用的alloca操作
-//   for (auto allocaOp : allocaOps) {
-//     if (!processedOps.count(allocaOp)) {
-//       builder.setInsertionPointToEnd(newBlock);
-//       auto newAllocaOp = builder.clone(*allocaOp, mapper);
-      
-//       // 更新映射
-//       for (unsigned i = 0; i < allocaOp->getNumResults(); ++i) {
-//         mapper.map(allocaOp->getResult(i), newAllocaOp->getResult(i));
-//       }
-      
-//       processedOps.insert(allocaOp);
-//     }
-//   }
-  
-//   // 阶段3：复制剩余未处理的操作
-//   bool hasReturnOp = false;
-//   Operation* returnOp = nullptr;
-  
-//   for (auto &op : oldBlock->getOperations()) {
-//     if (processedOps.count(&op))
-//       continue;
-    
-//     // 如果是返回操作，先不克隆，稍后处理
-//     if (isa<func::ReturnOp>(op)) {
-//       hasReturnOp = true;
-//       returnOp = &op;
-//       continue;
-//     }
-    
-//     // 对于GPU wait操作，根据预分析结果决定是否需要保留
-//     if (auto waitOp = dyn_cast<gpu::WaitOp>(op)) {
-//       if (waitOpShouldKeep[waitOp]) {
-//         Operation *newOp = op.clone(mapper);
-//         newBlock->push_back(newOp);
-        
-//         // 更新映射
-//         for (unsigned i = 0; i < op.getNumResults(); ++i) {
-//           mapper.map(op.getResult(i), newOp->getResult(i));
-//         }
-//       }
-//       continue;
-//     }
-    
-//     Operation *newOp = op.clone(mapper);
-//     newBlock->push_back(newOp);
-    
-//     // 更新映射
-//     for (unsigned i = 0; i < op.getNumResults(); ++i) {
-//       mapper.map(op.getResult(i), newOp->getResult(i));
-//     }
-//   }
-  
-//   // 如果有来自最终级别的令牌，添加最终同步点
-//   if (!previousLevelTokens.empty()) {
-//     builder.setInsertionPointToEnd(newBlock);
-    
-//     // 添加最终同步等待
-//     builder.create<gpu::WaitOp>(funcOp.getLoc(), TypeRange{}, previousLevelTokens);
-
-//     // *** 新增：最终级别同步完成后，归还描述符 ***
-//     insertDescriptorReturnCall(builder, funcOp.getLoc(), descriptorReturnFunc);
-//   }
-  
-//   // 如果有返回操作，现在克隆它
-//   if (hasReturnOp) {
-//     builder.setInsertionPointToEnd(newBlock);
-//     Operation *newReturnOp = returnOp->clone(mapper);
-//     newBlock->push_back(newReturnOp);
-//   }
-  
-//   // 替换旧块
-//   // 1. 将新块添加到函数体
-//   funcOp.getBody().push_back(newBlock);
-  
-//   // 2. 更新使用关系 - 确保所有映射都正确建立
-//   for (auto &op : oldBlock->getOperations()) {
-//     for (unsigned i = 0; i < op.getNumResults(); ++i) {
-//       Value oldResult = op.getResult(i);
-//       if (mapper.contains(oldResult)) {
-//         Value newResult = mapper.lookup(oldResult);
-//         // 替换所有不在旧块中的使用
-//         llvm::SmallVector<mlir::OpOperand*, 4> usesToReplace;
-//         for (auto &use : oldResult.getUses()) {
-//           Operation* userOp = use.getOwner();
-//           if (userOp->getBlock() != oldBlock) {
-//             usesToReplace.push_back(&use);
-//           }
-//         }
-        
-//         for (auto *use : usesToReplace) {
-//           use->set(newResult);
-//         }
-//       }
-//     }
-//   }
-  
-//   // 3. 检查外部引用情况
-//   bool hasExternalUses = false;
-//   for (auto &op : oldBlock->getOperations()) {
-//     for (auto result : op.getResults()) {
-//       for (auto &use : result.getUses()) {
-//         if (use.getOwner()->getBlock() != oldBlock) {
-//           // 只对那些我们没有为其创建映射的操作报告警告
-//           if (!mapper.contains(result)) {
-//             llvm::errs() << "Warning: Operation still has external uses: ";
-//             op.print(llvm::errs());
-//             llvm::errs() << "\n";
-//             hasExternalUses = true;
-//           }
-//         }
-//       }
-//     }
-//   }
-  
-//   if (hasExternalUses) {
-//     llvm::errs() << "Error: Cannot safely delete old block due to external references\n";
-//     return;
-//   }
-  
-//   // 4. 现在可以安全地删除旧块
-//   oldBlock->dropAllUses();
-//   oldBlock->erase();
-// }
+// Helper function to insert workspace return call
+void insertWorkspaceReturnCall(OpBuilder& builder, Location loc, 
+                               func::FuncOp WorkspaceReturnFunc) {
+  // Create call to mgpuReturnAllActiveDescriptors
+  builder.create<func::CallOp>(
+      loc,
+      WorkspaceReturnFunc.getName(),
+      TypeRange{},  // No return types
+      ValueRange{}  // No arguments
+  );
+}
 
 void reorganizeIR(func::FuncOp funcOp, DependencyGraph &graph) {
   OpBuilder builder(funcOp.getContext());
@@ -535,6 +113,8 @@ void reorganizeIR(func::FuncOp funcOp, DependencyGraph &graph) {
   
   // Ensure mgpuReturnAllActiveDescriptors function declaration exists
   func::FuncOp descriptorReturnFunc = ensureDescriptorReturnFuncDecl(moduleOp, builder);
+
+  func::FuncOp workspaceReturnFunc = ensureWorkspaceReturnFuncDecl(moduleOp, builder);
   
   // 创建映射以跟踪操作映射关系
   IRMapping mapper;
@@ -813,6 +393,7 @@ void reorganizeIR(func::FuncOp funcOp, DependencyGraph &graph) {
     if (shouldInsertDescriptorReturn && level < maxLevel) {
       builder.setInsertionPointToEnd(newBlock);
       insertDescriptorReturnCall(builder, funcOp.getLoc(), descriptorReturnFunc);
+      insertWorkspaceReturnCall(builder, funcOp.getLoc(), workspaceReturnFunc);
     }
     
     // 更新前一级别令牌用于下一级别
@@ -893,6 +474,7 @@ void reorganizeIR(func::FuncOp funcOp, DependencyGraph &graph) {
   if (hasAnyOperations) {
     builder.setInsertionPointToEnd(newBlock);
     insertDescriptorReturnCall(builder, funcOp.getLoc(), descriptorReturnFunc);
+    insertWorkspaceReturnCall(builder, funcOp.getLoc(), workspaceReturnFunc);
   }
   
   // 如果有返回操作，现在克隆它

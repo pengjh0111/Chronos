@@ -180,7 +180,10 @@ private:
 
       // Descriptor pool functions
       {"mgpuInitDescriptorPool", voidType, {i32Type, i32Type, i32Type, i32Type, i32Type}},
-      {"mgpuDestroyDescriptorPool", voidType, {}}
+      {"mgpuDestroyDescriptorPool", voidType, {}},
+
+      {"mgpuInitWorkspacePool", voidType, {i32Type, i32Type}},
+      {"mgpuDestroyWorkspacePool", voidType, {}} 
     };
     
     LLVM_DEBUG(llvm::dbgs() << "Adding function declarations\n");
@@ -281,6 +284,10 @@ private:
     auto opTensorPoolSize = builder.create<LLVM::ConstantOp>(
         func.getLoc(), i32Type, builder.getI32IntegerAttr(20));
 
+    auto workspacePoolSize = builder.create<LLVM::ConstantOp>(
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(25));
+    auto workspaceSize = builder.create<LLVM::ConstantOp>(
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(128));
     LLVM_DEBUG(llvm::dbgs() << "Adding pool initialization calls\n");
     
     // Add mgpuInitStreamPool(35)
@@ -305,6 +312,12 @@ private:
         ValueRange{tensorPoolSize, filterPoolSize, convPoolSize, 
                    poolingPoolSize, opTensorPoolSize});
 
+    // Add mgpuInitDescriptorPool
+    builder.create<LLVM::CallOp>(
+        func.getLoc(),
+        TypeRange{},
+        "mgpuInitWorkspacePool",
+        ValueRange{workspacePoolSize, workspaceSize});
   }
   
   void addPoolCleanup(LLVM::LLVMFuncOp func) {
@@ -341,6 +354,13 @@ private:
           returnOp.getLoc(),
           TypeRange{},
           "mgpuDestroyDescriptorPool",
+          ValueRange{});
+
+      // Add mgpuDestroyDescriptorPool()
+      builder.create<LLVM::CallOp>(
+          returnOp.getLoc(),
+          TypeRange{},
+          "mgpuDestroyWorkspacePool",
           ValueRange{});
     }
   }
