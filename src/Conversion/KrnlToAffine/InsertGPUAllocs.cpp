@@ -563,6 +563,59 @@ static bool isScalarParameter(func::CallOp callOp, Value paramValue) {
   return false;
 }
 
+// Value InsertGPUAllocPass::processScalarConstant(OpBuilder &builder, Location loc, Value operand) {
+//   // 检查操作数是否为f32或f16标量类型
+//   if (auto floatType = operand.getType().dyn_cast<FloatType>()) {
+//     if (floatType.isF32() || floatType.isF16()) {
+//       // 检查是否来自memref.load
+//       if (auto loadOp = operand.getDefiningOp<memref::LoadOp>()) {
+//         Value memref = loadOp.getMemref();
+        
+//         // 检查memref是否来自krnl.global
+//         if (auto defOp = memref.getDefiningOp()) {
+//           if (defOp->getName().getStringRef() == "krnl.global") {
+//             // 尝试提取krnl.global的常量值
+//             if (auto valueAttr = defOp->getAttrOfType<mlir::Attribute>("value")) {
+//               if (auto denseAttr = valueAttr.dyn_cast<DenseElementsAttr>()) {
+//                 // 检查是否为标量常量（shape为空）
+//                 if (denseAttr.getType().getRank() == 0) {
+//                   // 提取标量值
+//                   if (floatType.isF32()) {
+//                     float scalarValue = denseAttr.getSplatValue<APFloat>().convertToFloat();
+//                     // 创建arith.constant替换memref.load
+//                     Value constantOp = builder.create<arith::ConstantFloatOp>(
+//                         loc, llvm::APFloat(scalarValue), floatType);
+                    
+//                     // 替换所有使用该load操作的地方
+//                     loadOp.getResult().replaceAllUsesWith(constantOp);
+//                     loadOp.erase();
+                    
+//                     return constantOp;
+//                   } else if (floatType.isF16()) {
+//                     // 处理f16情况
+//                     float scalarValue = denseAttr.getSplatValue<APFloat>().convertToFloat();
+//                     Value constantOp = builder.create<arith::ConstantFloatOp>(
+//                         loc, llvm::APFloat(scalarValue), floatType);
+                    
+//                     // 替换所有使用该load操作的地方
+//                     loadOp.getResult().replaceAllUsesWith(constantOp);
+//                     loadOp.erase();
+                    
+//                     return constantOp;
+//                   }
+//                 }
+//               }
+//             }
+//           }
+//         }
+//       }
+//     }
+//   }
+  
+//   // 如果不符合条件，返回原始操作数
+//   return operand;
+// }
+
 Value InsertGPUAllocPass::processScalarConstant(OpBuilder &builder, Location loc, Value operand) {
   // 检查操作数是否为f32或f16标量类型
   if (auto floatType = operand.getType().dyn_cast<FloatType>()) {
@@ -579,30 +632,18 @@ Value InsertGPUAllocPass::processScalarConstant(OpBuilder &builder, Location loc
               if (auto denseAttr = valueAttr.dyn_cast<DenseElementsAttr>()) {
                 // 检查是否为标量常量（shape为空）
                 if (denseAttr.getType().getRank() == 0) {
-                  // 提取标量值
-                  if (floatType.isF32()) {
-                    float scalarValue = denseAttr.getSplatValue<APFloat>().convertToFloat();
-                    // 创建arith.constant替换memref.load
-                    Value constantOp = builder.create<arith::ConstantFloatOp>(
-                        loc, llvm::APFloat(scalarValue), floatType);
-                    
-                    // 替换所有使用该load操作的地方
-                    loadOp.getResult().replaceAllUsesWith(constantOp);
-                    loadOp.erase();
-                    
-                    return constantOp;
-                  } else if (floatType.isF16()) {
-                    // 处理f16情况
-                    float scalarValue = denseAttr.getSplatValue<APFloat>().convertToFloat();
-                    Value constantOp = builder.create<arith::ConstantFloatOp>(
-                        loc, llvm::APFloat(scalarValue), floatType);
-                    
-                    // 替换所有使用该load操作的地方
-                    loadOp.getResult().replaceAllUsesWith(constantOp);
-                    loadOp.erase();
-                    
-                    return constantOp;
-                  }
+                  // 直接使用DenseElementsAttr中的APFloat，它已经具有正确的精度
+                  APFloat originalValue = denseAttr.getSplatValue<APFloat>();
+                  
+                  // 创建arith.constant替换memref.load
+                  Value constantOp = builder.create<arith::ConstantFloatOp>(
+                      loc, originalValue, floatType);
+                  
+                  // 替换所有使用该load操作的地方
+                  loadOp.getResult().replaceAllUsesWith(constantOp);
+                  loadOp.erase();
+                  
+                  return constantOp;
                 }
               }
             }
