@@ -108,6 +108,12 @@ std::unique_ptr<mlir::Pass> createLowerToStablehloPass(bool enableUnroll);
 /// Pass for eliding the values of global Krnl operations.
 std::unique_ptr<mlir::Pass> createElideConstGlobalValuePass();
 
+std::unique_ptr<mlir::Pass> createRedundantStreamSyncEliminationPass(); //modified by p
+
+std::unique_ptr<mlir::Pass> createHierarchicalParallelSchedulerPass(); //modified by p
+
+std::unique_ptr<mlir::Pass> createStreamUnificationPass(); //modified by p
+
 std::unique_ptr<mlir::Pass> createF16ThresholdOptimizationPass(); //modified by p
 
 std::unique_ptr<mlir::Pass> createCudaPoolConversionPass(); //modified by p

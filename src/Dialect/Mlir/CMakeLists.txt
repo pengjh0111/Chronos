@@ -18,6 +18,11 @@ add_onnx_mlir_library(OMMlirDialects
   EliminateRedundantPtrConversion.cpp
   UseHandleStreamPool.cpp
   FP16ThresholdPass.cpp
+  EnhancedDependencyGraph.cpp
+  EnhancedIrReorganization.cpp
+  StreamUnificationPass.cpp
+  HierarchicalParallelScheduler.cpp
+  EliminateRedundantStreamSync.cpp
 
   DEPENDS
   OMKrnlIncGen
@@ -26,6 +31,7 @@ add_onnx_mlir_library(OMMlirDialects
   LINK_LIBS PUBLIC
   OMCompilerOptions
   MLIRMathDialect
+  MLIRLLVMDialect
   MLIRAffineDialect
   MLIRSCFDialect
   MLIRVectorDialect

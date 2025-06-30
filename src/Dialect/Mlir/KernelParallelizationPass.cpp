@@ -111,6 +111,8 @@
 #include "DependencyGraph.h"
 #include "TopoLogicalSort.h"
 #include "IrReorganization.h"
+#include "EnhancedDependencyGraph.h"
+#include "EnhancedIrReorganization.h"
 
 using namespace mlir;
 using namespace onnx_mlir;
@@ -144,6 +146,7 @@ struct KernelParallelizationPass
         
         // Build dependency graph
         auto graph = buildDependencyGraph(funcOp);
+
         LLVM_DEBUG(llvm::dbgs() << "Built dependency graph with " 
                 << graph->nodes.size() << " nodes\n");
         
@@ -203,6 +206,59 @@ struct KernelParallelizationPass
         LLVM_DEBUG(llvm::dbgs() << "No kernel nodes found, skipping GPU module reorganization\n");
     }
   }
+
+
+// void runOnOperation() override {
+//     ModuleOp moduleOp = getOperation();
+    
+//     for (auto funcOp : moduleOp.getOps<func::FuncOp>()) {
+//         LLVM_DEBUG(llvm::dbgs() << "Processing function: " << funcOp.getName() << "\n");
+        
+//         // 安全检查：跳过空函数或声明
+//         if (funcOp.getBody().empty()) {
+//             LLVM_DEBUG(llvm::dbgs() << "Skipping function " << funcOp.getName() << " (empty body)\n");
+//             continue;
+//         }
+        
+//         // === 步骤1：构建增强依赖图（替换原来的buildDependencyGraph） ===
+//         auto enhancedGraph = buildEnhancedDependencyGraph(funcOp);
+        
+//         LLVM_DEBUG(llvm::dbgs() << "Built enhanced dependency graph with " 
+//                 << enhancedGraph->nodes.size() << " nodes\n");
+        
+//         // 如果没有找到任何节点，跳过这个函数
+//         if (enhancedGraph->nodes.empty()) {
+//             LLVM_DEBUG(llvm::dbgs() << "No parallelizable nodes found in function " 
+//                     << funcOp.getName() << ", skipping\n");
+//             continue;
+//         }
+        
+//         // === 步骤2：执行增强调度（替换原来的performTopologicalSort） ===
+//         // 注意：增强调度已经在buildEnhancedDependencyGraph内部完成了
+//         // 通过调用 performEnhancedScheduling()
+//         LLVM_DEBUG(llvm::dbgs() << "Enhanced scheduling completed during graph building\n");
+        
+//         // === 步骤3：重组IR（替换原来的reorganizeIR） ===
+//         try {
+//             reorganizeIRWithEnhancedScheduling_plus(funcOp, *enhancedGraph);
+//             LLVM_DEBUG(llvm::dbgs() << "Enhanced IR reorganization completed for function: " 
+//                       << funcOp.getName() << "\n");
+//         } catch (const std::exception& e) {
+//             llvm::errs() << "Error in enhanced IR reorganization for function " << funcOp.getName() 
+//                         << ": " << e.what() << "\n";
+//             return signalPassFailure();
+//         }
+        
+//         // === 步骤4：重组GPU模块（替换原来的reorganizeGPUModules） ===
+//         try {
+//             reorganizeGPUModules_plus(moduleOp, *enhancedGraph);
+//             LLVM_DEBUG(llvm::dbgs() << "Enhanced GPU module reorganization completed\n");
+//         } catch (const std::exception& e) {
+//             llvm::errs() << "Error in enhanced GPU module reorganization: " << e.what() << "\n";
+//             return signalPassFailure();
+//         }
+//     }
+// }
 };
 
 } // end anonymous namespace

@@ -37,6 +37,18 @@ void registerOMPasses(int optLevel) {
   // function to make themselves available as a command-line option.
 
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> { //modified by p
+    return createRedundantStreamSyncEliminationPass();
+  });
+
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> { //modified by p
+    return createHierarchicalParallelSchedulerPass();
+  });
+
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> { //modified by p
+    return createStreamUnificationPass();
+  });
+
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> { //modified by p
     return createF16ThresholdOptimizationPass();
   });
 
