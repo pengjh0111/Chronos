@@ -404,12 +404,12 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
     target.addLegalOp<ONNXTransposeOp>();
 
     target.addLegalOp<ONNXConvOp>(); // modified by p
-    target.addLegalOp<ONNXAddOp>(); // modified by p
-    target.addLegalOp<ONNXSubOp>(); // modified by p
-    target.addLegalOp<ONNXMulOp>(); // modified by p 
-    target.addLegalOp<ONNXNegOp>(); // modified by p
+    // target.addLegalOp<ONNXAddOp>(); // modified by p
+    // target.addLegalOp<ONNXSubOp>(); // modified by p
+    // target.addLegalOp<ONNXMulOp>(); // modified by p 
+    // target.addLegalOp<ONNXNegOp>(); // modified by p
+    // target.addLegalOp<ONNXDivOp>(); // modified by p
     target.addLegalOp<ONNXGemmOp>(); // modified by p
-    target.addLegalOp<ONNXDivOp>(); // modified by p
     target.addLegalOp<ONNXFlattenOp>(); // modified by p
     target.addLegalOp<ONNXMaxPoolSingleOutOp>(); // modified by p
   }
