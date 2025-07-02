@@ -1724,8 +1724,8 @@ private:
         {"onnx.name", "onnx.dim_params"}, /*isArg=*/false);
 
     // Emit entry point op describing inference function signature.
-    auto entryPoint = ONNXEntryPointOp::create(UnknownLoc(), mainFunc);
-    module_.push_back(entryPoint);
+    // auto entryPoint = ONNXEntryPointOp::create(UnknownLoc(), mainFunc);
+    // module_.push_back(entryPoint);
 
     return mainFunc;
   }
