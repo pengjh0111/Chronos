@@ -213,16 +213,76 @@ private:
     return success();
   }
   
-  LogicalResult addPoolManagement(ModuleOp moduleOp) {
-    // Find all functions in the module
+  // LogicalResult addPoolManagement(ModuleOp moduleOp) {
+  //   // Find all functions in the module
+  //   auto functions = moduleOp.getOps<LLVM::LLVMFuncOp>();
+  //   if (functions.empty()) {
+  //     LLVM_DEBUG(llvm::dbgs() << "No functions found in module\n");
+  //     return success();
+  //   }
+    
+  //   // Find the main function or a function that contains CUDA operations
+  //   LLVM::LLVMFuncOp targetFunc = nullptr;
+  //   for (auto func : functions) {
+  //     // Skip the function declarations we just added
+  //     if (func.isExternal()) {
+  //       continue;
+  //     }
+      
+  //     // Look for a function that contains CUDA calls
+  //     bool hasCudaCalls = false;
+  //     func.walk([&](LLVM::CallOp callOp) {
+  //       if (callOp.getCallee() && 
+  //           (callOp.getCallee().value().contains("mgpu") || 
+  //            callOp.getCallee().value().contains("cuda"))) {
+  //         hasCudaCalls = true;
+  //       }
+  //     });
+      
+  //     if (hasCudaCalls) {
+  //       targetFunc = func;
+  //       break;
+  //     }
+  //   }
+    
+  //   if (!targetFunc) {
+  //     LLVM_DEBUG(llvm::dbgs() << "No function with CUDA calls found\n");
+  //     return success();
+  //   }
+    
+  //   LLVM_DEBUG(llvm::dbgs() << "Adding pool management to function: " 
+  //              << targetFunc.getName() << "\n");
+    
+  //   // Add initialization at the beginning
+  //   addPoolInitialization(targetFunc);
+    
+  //   // Add cleanup before all return statements
+  //   addPoolCleanup(targetFunc);
+    
+  //   return success();
+  // }
+  
+LogicalResult addPoolManagement(ModuleOp moduleOp) {
+  // 直接查找名为"main"的函数
+  LLVM::LLVMFuncOp targetFunc = moduleOp.lookupSymbol<LLVM::LLVMFuncOp>("main");
+  
+  if (!targetFunc) {
+    LLVM_DEBUG(llvm::dbgs() << "Main function not found in module\n");
+    // 可以选择以下策略之一：
+    
+    // 策略1: 直接返回失败
+    // return failure();
+    
+    // 策略2: 发出警告并使用原来的逻辑作为fallback
+    LLVM_DEBUG(llvm::dbgs() << "Falling back to finding function with CUDA calls\n");
+    
     auto functions = moduleOp.getOps<LLVM::LLVMFuncOp>();
     if (functions.empty()) {
       LLVM_DEBUG(llvm::dbgs() << "No functions found in module\n");
       return success();
     }
     
-    // Find the main function or a function that contains CUDA operations
-    LLVM::LLVMFuncOp targetFunc = nullptr;
+    // 原来的fallback逻辑：查找包含CUDA调用的函数
     for (auto func : functions) {
       // Skip the function declarations we just added
       if (func.isExternal()) {
@@ -249,19 +309,26 @@ private:
       LLVM_DEBUG(llvm::dbgs() << "No function with CUDA calls found\n");
       return success();
     }
-    
-    LLVM_DEBUG(llvm::dbgs() << "Adding pool management to function: " 
-               << targetFunc.getName() << "\n");
-    
-    // Add initialization at the beginning
-    addPoolInitialization(targetFunc);
-    
-    // Add cleanup before all return statements
-    addPoolCleanup(targetFunc);
-    
-    return success();
   }
   
+  // 检查目标函数是否为函数声明（external）
+  if (targetFunc.isExternal()) {
+    LLVM_DEBUG(llvm::dbgs() << "Target function is external, cannot modify\n");
+    return failure();
+  }
+  
+  LLVM_DEBUG(llvm::dbgs() << "Adding pool management to function: " 
+             << targetFunc.getName() << "\n");
+  
+  // Add initialization at the beginning
+  addPoolInitialization(targetFunc);
+  
+  // Add cleanup before all return statements
+  addPoolCleanup(targetFunc);
+  
+  return success();
+}
+
   void addPoolInitialization(LLVM::LLVMFuncOp func) {
     OpBuilder builder(func.getContext());
     Block &entryBlock = func.getBody().front();
@@ -270,22 +337,22 @@ private:
     // Create constant for pool size (35)
     auto i32Type = IntegerType::get(builder.getContext(), 32);
     auto poolSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(35));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(80));
     
     // Descriptor pool sizes (75, 20, 20, 20, 20)
     auto tensorPoolSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(75));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(85));
     auto filterPoolSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(20));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(35));
     auto convPoolSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(20));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(35));
     auto poolingPoolSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(20));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(35));
     auto opTensorPoolSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(20));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(35));
 
     auto workspacePoolSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(25));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(35));
     auto workspaceSize = builder.create<LLVM::ConstantOp>(
         func.getLoc(), i32Type, builder.getI32IntegerAttr(128));
     LLVM_DEBUG(llvm::dbgs() << "Adding pool initialization calls\n");
