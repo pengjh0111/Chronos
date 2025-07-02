@@ -23,6 +23,7 @@ add_onnx_mlir_library(OMMlirDialects
   StreamUnificationPass.cpp
   HierarchicalParallelScheduler.cpp
   EliminateRedundantStreamSync.cpp
+  InsertMainFunctionPass.cpp
 
   DEPENDS
   OMKrnlIncGen
