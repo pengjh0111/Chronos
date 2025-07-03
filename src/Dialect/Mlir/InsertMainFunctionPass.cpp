@@ -71,16 +71,20 @@
 //     LLVM_DEBUG(llvm::dbgs() << "main_graph has " << inputTypes.size() << " inputs\n");
     
 //     // Create global constants for each input
-//     SmallVector<memref::GlobalOp> globalOps;
+//     // 修复: 使用 std::string 向量来确保字符串生命周期
+//     SmallVector<std::string> globalNameStrings;
 //     SmallVector<StringRef> globalNames;
     
 //     for (auto [idx, inputType] : llvm::enumerate(inputTypes)) {
 //       if (auto memrefType = inputType.dyn_cast<MemRefType>()) {
 //         std::string globalName = "__constant_input_" + std::to_string(idx);
-//         globalNames.push_back(StringRef(globalName));
+        
+//         // 先存储到 vector 中确保生命周期
+//         globalNameStrings.push_back(globalName);
+//         globalNames.push_back(StringRef(globalNameStrings.back()));
         
 //         // Create the global constant
-//         if (failed(createGlobalConstant(builder, moduleOp, globalName, memrefType, loc))) {
+//         if (failed(createGlobalConstant(builder, moduleOp, globalNameStrings.back(), memrefType, loc))) {
 //           return failure();
 //         }
         
@@ -88,6 +92,7 @@
 //       } else {
 //         // Skip non-memref inputs for now
 //         LLVM_DEBUG(llvm::dbgs() << "Skipping non-memref input type\n");
+//         globalNameStrings.push_back("");
 //         globalNames.push_back("");
 //       }
 //     }
@@ -215,12 +220,12 @@
 
 // static mlir::PassRegistration<InsertMainFunctionPass> pass;
 
-
 #include "mlir/Pass/Pass.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/GPU/IR/GPUDialect.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
@@ -245,6 +250,7 @@ struct InsertMainFunctionPass
     registry.insert<memref::MemRefDialect>();
     registry.insert<gpu::GPUDialect>();
     registry.insert<arith::ArithDialect>();
+    registry.insert<scf::SCFDialect>();
   }
   
   void runOnOperation() override {
@@ -288,8 +294,13 @@ private:
     
     LLVM_DEBUG(llvm::dbgs() << "main_graph has " << inputTypes.size() << " inputs\n");
     
-    // Create global constants for each input
-    // 修复: 使用 std::string 向量来确保字符串生命周期
+    // 判断是否有输入参数
+    if (inputTypes.empty()) {
+      // 无输入参数，直接创建main函数
+      return createMainFunctionBody(builder, moduleOp, mainGraphFunc, {}, loc);
+    }
+    
+    // 有输入参数，创建全局常量
     SmallVector<std::string> globalNameStrings;
     SmallVector<StringRef> globalNames;
     
@@ -368,57 +379,73 @@ private:
     auto inputTypes = mainGraphFunc.getFunctionType().getInputs();
     SmallVector<Value> gpuMemrefs;
     
-    // Process each input
-    for (auto [idx, inputType] : llvm::enumerate(inputTypes)) {
-      if (auto memrefType = inputType.dyn_cast<MemRefType>()) {
-        StringRef globalName = globalNames[idx];
-        if (globalName.empty()) continue;
-        
-        // Get global memref
-        auto globalGetOp = builder.create<memref::GetGlobalOp>(
-            loc, memrefType, globalName);
-        
-        // Create async token
-        auto tokenType = gpu::AsyncTokenType::get(builder.getContext());
-        auto waitOp = builder.create<gpu::WaitOp>(loc, tokenType, ValueRange{});
-        
-        // Allocate GPU memory
-        auto allocOp = builder.create<gpu::AllocOp>(
-            loc, 
-            memrefType,
-            tokenType,
-            /*asyncDependencies=*/ValueRange{waitOp.getAsyncToken()},
-            /*dynamicSizes=*/ValueRange{},
-            /*symbolOperands=*/ValueRange{});
-        
-        // Copy to GPU memory
-        auto memcpyOp = builder.create<gpu::MemcpyOp>(
-            loc,
-            tokenType,
-            /*asyncDependencies=*/ValueRange{allocOp.getAsyncToken()},
-            /*dst=*/allocOp.getMemref(),
-            /*src=*/globalGetOp.getResult());
-        
-        // Wait for copy to complete
-        builder.create<gpu::WaitOp>(loc, TypeRange{}, 
-                                   ValueRange{memcpyOp.getAsyncToken()});
-        
-        gpuMemrefs.push_back(allocOp.getMemref());
-        
-        LLVM_DEBUG(llvm::dbgs() << "Added GPU allocation and copy for input " << idx << "\n");
+    // 如果有输入参数，处理GPU内存分配
+    if (!inputTypes.empty()) {
+      // Process each input
+      for (auto [idx, inputType] : llvm::enumerate(inputTypes)) {
+        if (auto memrefType = inputType.dyn_cast<MemRefType>()) {
+          StringRef globalName = globalNames[idx];
+          if (globalName.empty()) continue;
+          
+          // Get global memref
+          auto globalGetOp = builder.create<memref::GetGlobalOp>(
+              loc, memrefType, globalName);
+          
+          // Create async token
+          auto tokenType = gpu::AsyncTokenType::get(builder.getContext());
+          auto waitOp = builder.create<gpu::WaitOp>(loc, tokenType, ValueRange{});
+          
+          // Allocate GPU memory
+          auto allocOp = builder.create<gpu::AllocOp>(
+              loc, 
+              memrefType,
+              tokenType,
+              /*asyncDependencies=*/ValueRange{waitOp.getAsyncToken()},
+              /*dynamicSizes=*/ValueRange{},
+              /*symbolOperands=*/ValueRange{});
+          
+          // Copy to GPU memory
+          auto memcpyOp = builder.create<gpu::MemcpyOp>(
+              loc,
+              tokenType,
+              /*asyncDependencies=*/ValueRange{allocOp.getAsyncToken()},
+              /*dst=*/allocOp.getMemref(),
+              /*src=*/globalGetOp.getResult());
+          
+          // Wait for copy to complete
+          builder.create<gpu::WaitOp>(loc, TypeRange{}, 
+                                     ValueRange{memcpyOp.getAsyncToken()});
+          
+          gpuMemrefs.push_back(allocOp.getMemref());
+          
+          LLVM_DEBUG(llvm::dbgs() << "Added GPU allocation and copy for input " << idx << "\n");
+        }
       }
     }
     
-    // Call main_graph with GPU allocated memrefs
+    // 创建scf.for循环的常量
+    auto indexType = builder.getIndexType();
+    auto c0 = builder.create<arith::ConstantOp>(loc, builder.getIndexAttr(0));
+    auto c2 = builder.create<arith::ConstantOp>(loc, builder.getIndexAttr(2));
+    auto c1 = builder.create<arith::ConstantOp>(loc, builder.getIndexAttr(1));
+    
+    // 创建scf.for循环
+    auto forOp = builder.create<scf::ForOp>(loc, c0, c2, c1);
+    
+    // 在循环体内调用main_graph
+    builder.setInsertionPointToStart(forOp.getBody());
+    
+    // Call main_graph with GPU allocated memrefs (or no args if empty)
     auto callOp = builder.create<func::CallOp>(
         loc,
         mainGraphFunc.getFunctionType().getResults(),
         "main_graph",
         gpuMemrefs);
     
-    LLVM_DEBUG(llvm::dbgs() << "Added call to main_graph\n");
+    LLVM_DEBUG(llvm::dbgs() << "Added scf.for loop with call to main_graph\n");
     
-    // Add return
+    // 回到main函数的结尾添加return
+    builder.setInsertionPointAfter(forOp);
     builder.create<func::ReturnOp>(loc);
     
     // Move main function to the end of the module

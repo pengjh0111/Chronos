@@ -337,22 +337,22 @@ LogicalResult addPoolManagement(ModuleOp moduleOp) {
     // Create constant for pool size (35)
     auto i32Type = IntegerType::get(builder.getContext(), 32);
     auto poolSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(80));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(110));
     
     // Descriptor pool sizes (75, 20, 20, 20, 20)
     auto tensorPoolSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(85));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(100));
     auto filterPoolSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(35));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(50));
     auto convPoolSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(35));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(50));
     auto poolingPoolSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(35));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(50));
     auto opTensorPoolSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(35));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(50));
 
     auto workspacePoolSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(35));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(50));
     auto workspaceSize = builder.create<LLVM::ConstantOp>(
         func.getLoc(), i32Type, builder.getI32IntegerAttr(128));
     LLVM_DEBUG(llvm::dbgs() << "Adding pool initialization calls\n");
