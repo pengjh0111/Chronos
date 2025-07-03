@@ -398,7 +398,7 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
     // being lowered further. See the comment in the declaration of
     // 'emitIntermediateIR' for more details.
     target.addLegalOp<ONNXMatMulOp>(); // modified by p
-    target.addLegalOp<ONNXReshapeOp>();
+    // target.addLegalOp<ONNXReshapeOp>();
     target.addLegalOp<ONNXSplitV11Op>();
     target.addLegalOp<ONNXSqueezeV11Op>();
     target.addLegalOp<ONNXTransposeOp>();
@@ -410,8 +410,9 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
     // target.addLegalOp<ONNXNegOp>(); // modified by p
     // target.addLegalOp<ONNXDivOp>(); // modified by p
     target.addLegalOp<ONNXGemmOp>(); // modified by p
-    target.addLegalOp<ONNXFlattenOp>(); // modified by p
+    // target.addLegalOp<ONNXFlattenOp>(); // modified by p (SqueezeNet needed)
     target.addLegalOp<ONNXMaxPoolSingleOutOp>(); // modified by p
+    target.addLegalOp<ONNXAveragePoolOp>(); // modified by p
   }
 
   // Conversion target for accelerators.
