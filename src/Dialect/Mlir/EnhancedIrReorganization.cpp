@@ -1555,10 +1555,82 @@ Value processSequentialSegment_plus(
 
 // ===== Node Processing Functions Implementation =====
 
+//p
+// Value processKernelNodeEnhanced_plus(EnhancedDependencyNode* node, OpBuilder& builder, 
+//                                     IRMapping& mapper, Value waitToken, 
+//                                     llvm::DenseSet<Operation*>& processedOps) {
+//   auto kernelOp = cast<gpu::LaunchFuncOp>(node->op);
+  
+//   auto kernelSymbol = SymbolRefAttr::get(
+//       builder.getContext(),
+//       kernelOp.getKernelModuleName(),
+//       {SymbolRefAttr::get(builder.getContext(), kernelOp.getKernelName())});
+  
+//   SmallVector<Value, 8> remappedOperands;
+//   for (Value operand : kernelOp.getKernelOperands()) {
+//     remappedOperands.push_back(mapper.lookupOrDefault(operand));
+//   }
+  
+//   auto gridSize = kernelOp.getGridSizeOperandValues();
+//   auto blockSize = kernelOp.getBlockSizeOperandValues();
+  
+//   mlir::gpu::KernelDim3 mappedGridSize = {
+//     mapper.lookupOrDefault(gridSize.x),
+//     mapper.lookupOrDefault(gridSize.y),
+//     mapper.lookupOrDefault(gridSize.z)
+//   };
+  
+//   mlir::gpu::KernelDim3 mappedBlockSize = {
+//     mapper.lookupOrDefault(blockSize.x),
+//     mapper.lookupOrDefault(blockSize.y),
+//     mapper.lookupOrDefault(blockSize.z)
+//   };
+  
+//   auto newLaunchOp = builder.create<gpu::LaunchFuncOp>(
+//       kernelOp.getLoc(),
+//       kernelSymbol,
+//       mappedGridSize,
+//       mappedBlockSize,
+//       Value(),
+//       remappedOperands,
+//       builder.getType<gpu::AsyncTokenType>(),
+//       ValueRange{waitToken},
+//       std::nullopt);
+
+//     addSchedulingAttributes(newLaunchOp, node->parallelGroupId, node->subgraphId, node->intraSubgraphLevel, builder);
+
+
+//   if (kernelOp->getNumResults() > 0) {
+//     mapper.map(kernelOp->getResult(0), newLaunchOp->getResult(0));
+//   }
+  
+//   processedOps.insert(node->op);
+//   return newLaunchOp.getAsyncToken();
+// }
+
 Value processKernelNodeEnhanced_plus(EnhancedDependencyNode* node, OpBuilder& builder, 
                                     IRMapping& mapper, Value waitToken, 
                                     llvm::DenseSet<Operation*>& processedOps) {
   auto kernelOp = cast<gpu::LaunchFuncOp>(node->op);
+  
+  // 收集所有依赖操作，包括 memref 转换操作
+  llvm::SetVector<Operation*> requiredOps;
+  collectDependentOpsEnhanced_plus(kernelOp, requiredOps, processedOps);
+  
+  // 处理依赖操作
+  for (Operation* requiredOp : requiredOps) {
+    if (!processedOps.count(requiredOp)) {
+      Operation* newOp = builder.clone(*requiredOp, mapper);
+      for (unsigned i = 0; i < requiredOp->getNumResults(); ++i) {
+        mapper.map(requiredOp->getResult(i), newOp->getResult(i));
+      }
+      processedOps.insert(requiredOp);
+      
+      if (isMemRefTransformOp(requiredOp)) {
+        // llvm::errs() << "        Cloned memref transform op for kernel: " << requiredOp->getName() << "\n";
+      }
+    }
+  }
   
   auto kernelSymbol = SymbolRefAttr::get(
       builder.getContext(),
@@ -1596,8 +1668,7 @@ Value processKernelNodeEnhanced_plus(EnhancedDependencyNode* node, OpBuilder& bu
       ValueRange{waitToken},
       std::nullopt);
 
-    addSchedulingAttributes(newLaunchOp, node->parallelGroupId, node->subgraphId, node->intraSubgraphLevel, builder);
-
+  addSchedulingAttributes(newLaunchOp, node->parallelGroupId, node->subgraphId, node->intraSubgraphLevel, builder);
 
   if (kernelOp->getNumResults() > 0) {
     mapper.map(kernelOp->getResult(0), newLaunchOp->getResult(0));
@@ -1742,6 +1813,70 @@ void processCuLibsNodeEnhanced_plus(EnhancedDependencyNode* node, OpBuilder& bui
     }
   }
 }
+// p
+// void processCuLibsNodeWithStreamEnhanced_plus(EnhancedDependencyNode* node, OpBuilder& builder,
+//                                              IRMapping& mapper, llvm::DenseSet<Operation*>& processedOps,
+//                                              Value stream) {
+
+//   llvm::SetVector<Operation*> requiredOps;
+  
+//   Operation* mainCall = nullptr;
+//   for (Operation* culibsOp : node->culibsOps) {
+//     if (isCuLibsCall_plus(culibsOp)) {
+//       mainCall = culibsOp;
+//       break;
+//     }
+//   }
+  
+//   if (!mainCall) {
+//     llvm::errs() << "Warning: No main CuLibs call found in sequence\n";
+//     return;
+//   }
+  
+
+//   collectDependentOpsEnhanced_plus(mainCall, requiredOps, processedOps);
+  
+//   for (Operation* requiredOp : requiredOps) {
+//     if (!processedOps.count(requiredOp)) {
+//       Operation* newOp = builder.clone(*requiredOp, mapper);
+//       for (unsigned i = 0; i < requiredOp->getNumResults(); ++i) {
+//         mapper.map(requiredOp->getResult(i), newOp->getResult(i));
+//       }
+//       processedOps.insert(requiredOp);
+//     }
+//   }
+  
+//   if (!processedOps.count(mainCall)) {
+//     auto callOp = cast<func::CallOp>(mainCall);
+    
+//     llvm::SmallVector<Value, 8> newOperands;
+//     for (unsigned i = 0; i < callOp.getNumOperands() - 1; ++i) {
+//       newOperands.push_back(mapper.lookupOrDefault(callOp.getOperand(i)));
+//     }
+//     newOperands.push_back(stream);
+    
+//     auto newCallOp = builder.create<func::CallOp>(
+//         callOp.getLoc(),
+//         callOp.getCallee(),
+//         callOp.getResultTypes(),
+//         newOperands);
+    
+//     addSchedulingAttributes(newCallOp, node->parallelGroupId, node->subgraphId, node->intraSubgraphLevel, builder);
+
+
+//     for (unsigned i = 0; i < mainCall->getNumResults(); ++i) {
+//       mapper.map(mainCall->getResult(i), newCallOp.getResult(i));
+//     }
+    
+//     processedOps.insert(mainCall);
+    
+//     // llvm::errs() << "        Processed CuLibs call: " << callOp.getCallee() << " with provided stream\n";
+//   }
+  
+//   for (Operation* culibsOp : node->culibsOps) {
+//     processedOps.insert(culibsOp);
+//   }
+// }
 
 void processCuLibsNodeWithStreamEnhanced_plus(EnhancedDependencyNode* node, OpBuilder& builder,
                                              IRMapping& mapper, llvm::DenseSet<Operation*>& processedOps,
@@ -1762,9 +1897,17 @@ void processCuLibsNodeWithStreamEnhanced_plus(EnhancedDependencyNode* node, OpBu
     return;
   }
   
-
+  // 使用增强的依赖收集，特别处理 memref 转换操作
   collectDependentOpsEnhanced_plus(mainCall, requiredOps, processedOps);
   
+  // 额外收集 CuLibs 序列中其他操作的依赖
+  for (Operation* culibsOp : node->culibsOps) {
+    if (culibsOp != mainCall && !processedOps.count(culibsOp)) {
+      collectDependentOpsEnhanced_plus(culibsOp, requiredOps, processedOps);
+    }
+  }
+  
+  // 按照依赖顺序处理所需的操作
   for (Operation* requiredOp : requiredOps) {
     if (!processedOps.count(requiredOp)) {
       Operation* newOp = builder.clone(*requiredOp, mapper);
@@ -1772,9 +1915,15 @@ void processCuLibsNodeWithStreamEnhanced_plus(EnhancedDependencyNode* node, OpBu
         mapper.map(requiredOp->getResult(i), newOp->getResult(i));
       }
       processedOps.insert(requiredOp);
+      
+      // 调试信息：输出克隆的操作类型
+      if (isMemRefTransformOp(requiredOp)) {
+        // llvm::errs() << "        Cloned memref transform op: " << requiredOp->getName() << "\n";
+      }
     }
   }
   
+  // 处理主要的 CuLibs 调用
   if (!processedOps.count(mainCall)) {
     auto callOp = cast<func::CallOp>(mainCall);
     
@@ -1792,32 +1941,106 @@ void processCuLibsNodeWithStreamEnhanced_plus(EnhancedDependencyNode* node, OpBu
     
     addSchedulingAttributes(newCallOp, node->parallelGroupId, node->subgraphId, node->intraSubgraphLevel, builder);
 
-
     for (unsigned i = 0; i < mainCall->getNumResults(); ++i) {
       mapper.map(mainCall->getResult(i), newCallOp.getResult(i));
     }
     
     processedOps.insert(mainCall);
     
-    // llvm::errs() << "        Processed CuLibs call: " << callOp.getCallee() << " with provided stream\n";
+    // llvm::errs() << "        Processed CuLibs call: " << callOp.getCallee() << " with memref transform support\n";
   }
   
+  // 标记所有 CuLibs 序列操作为已处理
   for (Operation* culibsOp : node->culibsOps) {
     processedOps.insert(culibsOp);
   }
 }
 
 // ===== Helper Functions Implementation =====
+bool isMemRefTransformOp(Operation* op) {
+  return isa<memref::ReinterpretCastOp>(op) ||
+         isa<memref::CastOp>(op) ||
+         isa<memref::SubViewOp>(op) ||
+         isa<memref::ViewOp>(op) ||
+         isa<memref::ReshapeOp>(op) ||
+         isa<memref::ExpandShapeOp>(op) ||
+         isa<memref::CollapseShapeOp>(op);
+}
+
+void collectMemRefTransformDependencies_plus(Operation* op, llvm::SetVector<Operation*>& requiredOps, 
+                                            const llvm::DenseSet<Operation*>& processedOps) {
+  // 递归收集 memref 转换操作的依赖
+  for (Value operand : op->getOperands()) {
+    if (Operation* definingOp = operand.getDefiningOp()) {
+      if (!processedOps.count(definingOp) && !isa<BlockArgument>(operand)) {
+        // 如果是 memref 转换操作，继续递归收集
+        if (isMemRefTransformOp(definingOp)) {
+          collectMemRefTransformDependencies_plus(definingOp, requiredOps, processedOps);
+          requiredOps.insert(definingOp);
+        }
+        // 如果是其他需要移动的操作
+        else if (shouldMoveWithCuLibs_plus(definingOp)) {
+          collectDependentOpsEnhanced_plus(definingOp, requiredOps, processedOps);
+          requiredOps.insert(definingOp);
+        }
+      }
+    }
+  }
+}
+
+bool shouldMoveWithCuLibs_plus(Operation* op) {
+  // 原有的判断逻辑（如果之前有实现）
+  if (isa<arith::IndexCastOp>(op) ||
+      isa<mlir::LLVM::IntToPtrOp>(op) ||
+      isa<memref::ExtractAlignedPointerAsIndexOp>(op)) {
+    return true;
+  }
+  
+  // 新增：处理 memref 转换操作
+  if (isMemRefTransformOp(op)) {
+    return true;
+  }
+  
+  // 新增：处理常量操作
+  if (isa<arith::ConstantOp>(op)) {
+    return true;
+  }
+  
+  // 其他需要与 CuLibs 一起移动的操作
+  return false;
+}
+
+// // p
+// void collectDependentOpsEnhanced_plus(Operation* op, llvm::SetVector<Operation*>& requiredOps, 
+//                                      const llvm::DenseSet<Operation*>& processedOps) {
+//   for (Value operand : op->getOperands()) {
+//     if (Operation* definingOp = operand.getDefiningOp()) {
+
+//       if (!processedOps.count(definingOp) && !isa<BlockArgument>(operand)) {
+
+//         if (shouldMoveWithCuLibs(definingOp)) {
+
+//           collectDependentOpsEnhanced_plus(definingOp, requiredOps, processedOps);
+//           requiredOps.insert(definingOp);
+//         }
+//       }
+//     }
+//   }
+// }
 
 void collectDependentOpsEnhanced_plus(Operation* op, llvm::SetVector<Operation*>& requiredOps, 
                                      const llvm::DenseSet<Operation*>& processedOps) {
   for (Value operand : op->getOperands()) {
     if (Operation* definingOp = operand.getDefiningOp()) {
-
       if (!processedOps.count(definingOp) && !isa<BlockArgument>(operand)) {
-
-        if (shouldMoveWithCuLibs(definingOp)) {
-
+        
+        // 特殊处理：如果是 memref 转换操作，使用专门的收集函数
+        if (isMemRefTransformOp(definingOp)) {
+          collectMemRefTransformDependencies_plus(definingOp, requiredOps, processedOps);
+          requiredOps.insert(definingOp);
+        }
+        // 处理其他需要移动的操作
+        else if (shouldMoveWithCuLibs_plus(definingOp)) {
           collectDependentOpsEnhanced_plus(definingOp, requiredOps, processedOps);
           requiredOps.insert(definingOp);
         }

@@ -257,7 +257,14 @@ void insertDescriptorReturnCall(OpBuilder& builder, Location loc,
 void insertWorkspaceReturnCall(OpBuilder& builder, Location loc, 
                               func::FuncOp workspaceReturnFunc);
 
-bool shouldMoveWithCuLibs(Operation* op);
+bool shouldMoveWithCuLibs_plus(Operation* op);
+
+bool isMemRefTransformOp(Operation* op);
+
+void collectMemRefTransformDependencies_plus(Operation* op, llvm::SetVector<Operation*>& requiredOps, 
+                                            const llvm::DenseSet<Operation*>& processedOps);
+
+Value traceMemRefSource_plus(Value value);
 
 void finalizeSeparatedParallelGroup_plus(
     SeparatedParallelGroupResources& resources,

@@ -524,6 +524,152 @@ gpu::GPUFuncOp findKernelFunc_plus(gpu::LaunchFuncOp kernelOp) {
   return result;
 }
 
+// // p
+// void extractKernelDependencies_plus(gpu::LaunchFuncOp kernelOp, 
+//                               llvm::SetVector<Value> &inputs,
+//                               llvm::SetVector<Value> &outputs) {
+//   gpu::GPUFuncOp kernelFunc = findKernelFunc_plus(kernelOp);
+  
+//   if (!kernelFunc) {
+//     llvm::errs() << "Warning: Could not find kernel function definition for \"" 
+//                 << kernelOp.getKernelName() << "\", using conservative dependency analysis\n";
+//     for (auto arg : kernelOp.getKernelOperands()) {
+//       if (arg.getType().isa<MemRefType>()) {
+//         inputs.insert(arg);
+//         outputs.insert(arg);
+//       }
+//     }
+//     return;
+//   }
+
+//   llvm::SmallVector<std::pair<BlockArgument, Value>, 8> argOperandPairs;
+  
+//   unsigned memrefArgCount = 0;
+//   for (unsigned i = 0; i < kernelFunc.getNumArguments(); ++i) {
+//     if (kernelFunc.getArgument(i).getType().isa<MemRefType>()) {
+//       memrefArgCount++;
+//     }
+//   }
+  
+//   unsigned memrefOpCount = 0;
+//   llvm::SmallVector<Value, 8> memrefOperands;
+//   for (auto operand : kernelOp.getKernelOperands()) {
+//     if (operand.getType().isa<MemRefType>()) {
+//       memrefOperands.push_back(operand);
+//       memrefOpCount++;
+//     }
+//   }
+  
+//   unsigned opIdx = 0;
+//   for (unsigned i = 0; i < kernelFunc.getNumArguments(); ++i) {
+//     BlockArgument arg = kernelFunc.getArgument(i);
+//     if (arg.getType().isa<MemRefType>()) {
+//       if (opIdx < memrefOperands.size()) {
+//         Value operand = memrefOperands[opIdx++];
+//         argOperandPairs.push_back({arg, operand});
+//       }
+//     }
+//   }
+  
+//   llvm::DenseSet<BlockArgument> loadArgs;
+//   llvm::DenseSet<BlockArgument> storeArgs;
+  
+//   unsigned loadCount = 0, storeCount = 0;
+//   kernelFunc.walk([&](Operation *op) {
+//     if (auto loadOp = dyn_cast<memref::LoadOp>(op)) {
+//       Value memref = loadOp.getMemref();
+//       if (auto blockArg = dyn_cast<BlockArgument>(memref)) {
+//         if (blockArg.getOwner() == &kernelFunc.getBody().front()) {
+//           loadArgs.insert(blockArg);
+//           loadCount++;
+//         }
+//       }
+//     } 
+//     else if (auto storeOp = dyn_cast<memref::StoreOp>(op)) {
+//       Value memref = storeOp.getMemref();
+//       if (auto blockArg = dyn_cast<BlockArgument>(memref)) {
+//         if (blockArg.getOwner() == &kernelFunc.getBody().front()) {
+//           storeArgs.insert(blockArg);
+//           storeCount++;
+//         }
+//       }
+//     }
+//   });
+  
+//   for (auto &pair : argOperandPairs) {
+//     BlockArgument arg = pair.first;
+//     Value operand = pair.second;
+    
+//     bool isInput = loadArgs.count(arg) > 0;
+//     bool isOutput = storeArgs.count(arg) > 0;
+    
+//     if (isInput) {
+//       inputs.insert(operand);
+//     }
+    
+//     if (isOutput) {
+//       outputs.insert(operand);
+//     }
+    
+//     if (!isInput && !isOutput) {
+//       inputs.insert(operand);
+//       llvm::errs() << "  Conservative: treating unused arg " << arg.getArgNumber() << " as input\n";
+//     }
+//   }
+// }
+
+Value traceMemRefSource_plus(Value value) {
+  Value current = value;
+  
+  while (current) {
+    Operation* definingOp = current.getDefiningOp();
+    if (!definingOp) {
+      break;
+    }
+    
+    // 处理各种 memref 转换操作
+    if (auto reinterpretCastOp = dyn_cast<memref::ReinterpretCastOp>(definingOp)) {
+      current = reinterpretCastOp.getSource();
+      continue;
+    }
+    
+    if (auto castOp = dyn_cast<memref::CastOp>(definingOp)) {
+      current = castOp.getSource();
+      continue;
+    }
+    
+    if (auto subViewOp = dyn_cast<memref::SubViewOp>(definingOp)) {
+      current = subViewOp.getSource();
+      continue;
+    }
+    
+    if (auto viewOp = dyn_cast<memref::ViewOp>(definingOp)) {
+      current = viewOp.getSource();
+      continue;
+    }
+    
+    if (auto reshapeOp = dyn_cast<memref::ReshapeOp>(definingOp)) {
+      current = reshapeOp.getSource();
+      continue;
+    }
+    
+    if (auto expandShapeOp = dyn_cast<memref::ExpandShapeOp>(definingOp)) {
+      current = expandShapeOp.getSrc();
+      continue;
+    }
+    
+    if (auto collapseShapeOp = dyn_cast<memref::CollapseShapeOp>(definingOp)) {
+      current = collapseShapeOp.getSrc();
+      continue;
+    }
+    
+    // 如果不是 memref 转换操作，停止追踪
+    break;
+  }
+  
+  return current;
+}
+
 void extractKernelDependencies_plus(gpu::LaunchFuncOp kernelOp, 
                               llvm::SetVector<Value> &inputs,
                               llvm::SetVector<Value> &outputs) {
@@ -532,10 +678,13 @@ void extractKernelDependencies_plus(gpu::LaunchFuncOp kernelOp,
   if (!kernelFunc) {
     llvm::errs() << "Warning: Could not find kernel function definition for \"" 
                 << kernelOp.getKernelName() << "\", using conservative dependency analysis\n";
+    
+    // 保守分析：处理所有 memref 操作数，包括经过转换的
     for (auto arg : kernelOp.getKernelOperands()) {
-      if (arg.getType().isa<MemRefType>()) {
-        inputs.insert(arg);
-        outputs.insert(arg);
+      Value sourceMemRef = traceMemRefSource_plus(arg);
+      if (sourceMemRef.getType().isa<MemRefType>()) {
+        inputs.insert(sourceMemRef);
+        outputs.insert(sourceMemRef);
       }
     }
     return;
@@ -553,8 +702,10 @@ void extractKernelDependencies_plus(gpu::LaunchFuncOp kernelOp,
   unsigned memrefOpCount = 0;
   llvm::SmallVector<Value, 8> memrefOperands;
   for (auto operand : kernelOp.getKernelOperands()) {
-    if (operand.getType().isa<MemRefType>()) {
-      memrefOperands.push_back(operand);
+    // 追踪到原始的 memref，而不是经过转换的
+    Value sourceMemRef = traceMemRefSource_plus(operand);
+    if (sourceMemRef.getType().isa<MemRefType>()) {
+      memrefOperands.push_back(sourceMemRef);
       memrefOpCount++;
     }
   }
@@ -634,6 +785,101 @@ void extractLoopDependencies_plus(scf::ForOp loopOp,
   });
 }
 
+// // p
+// void extractCuLibsDependencies_plus(const llvm::SmallVector<Operation*, 4> &culibsOps,
+//                               llvm::SetVector<Value> &inputs,
+//                               llvm::SetVector<Value> &outputs) {
+//   Operation* mainCall = nullptr;
+//   for (Operation* op : culibsOps) {
+//     if (isCuLibsCall_plus(op)) {
+//       mainCall = op;
+//       break;
+//     }
+//   }
+  
+//   if (!mainCall) {
+//     return;
+//   }
+  
+//   auto callOp = cast<func::CallOp>(mainCall);
+//   StringRef funcName = callOp.getCallee();
+  
+//   auto operands = callOp.getOperands();
+  
+//   llvm::SmallVector<Value, 8> memrefOperands;
+  
+//   for (Value operand : operands) {
+//     if (auto intToPtrOp = operand.getDefiningOp<mlir::LLVM::IntToPtrOp>()) {
+//       Value intToPtrInput = intToPtrOp.getArg();
+//       if (auto indexCastOp = intToPtrInput.getDefiningOp<mlir::arith::IndexCastOp>()) {
+//         Value indexCastInput = indexCastOp->getOperand(0);
+//         if (auto extractOp = indexCastInput.getDefiningOp<mlir::memref::ExtractAlignedPointerAsIndexOp>()) {
+//           Value memref = extractOp.getSource();
+//           memrefOperands.push_back(memref);
+//         }
+//       }
+//     }
+//   }
+  
+//   if (funcName.contains("Conv2dForward")) {
+//     if (memrefOperands.size() >= 4) {
+//       inputs.insert(memrefOperands[0]);
+//       inputs.insert(memrefOperands[1]);  
+//       inputs.insert(memrefOperands[2]);
+//       outputs.insert(memrefOperands[3]);
+//     }
+//   }
+//   else if (funcName.contains("MaxPoolForward")) {
+//     if (memrefOperands.size() >= 2) {
+//       inputs.insert(memrefOperands[0]);
+//       outputs.insert(memrefOperands[1]);
+//     }
+//   }
+//   else if (funcName.contains("FullyConnectedForward")) {
+//     if (memrefOperands.size() >= 4) {
+//       inputs.insert(memrefOperands[0]);
+//       inputs.insert(memrefOperands[1]);
+//       inputs.insert(memrefOperands[2]);
+//       outputs.insert(memrefOperands[3]);
+//     }
+//     else if (memrefOperands.size() == 3) {
+//       inputs.insert(memrefOperands[0]);
+//       inputs.insert(memrefOperands[1]);
+//       outputs.insert(memrefOperands[2]);
+//     }
+//   }
+//   else if (funcName.contains("MulScalar") || funcName.contains("AddScalar") || 
+//            funcName.contains("SubScalar") || funcName.contains("RSubScalar")) {
+//     if (memrefOperands.size() >= 3) {
+//       inputs.insert(memrefOperands[0]);
+//       inputs.insert(memrefOperands[1]);
+//       outputs.insert(memrefOperands[2]);
+//     }
+//   }
+//   else if (funcName.contains("Mul") || funcName.contains("Add") || funcName.contains("Sub")) {
+//     if (memrefOperands.size() >= 3) {
+//       inputs.insert(memrefOperands[0]);
+//       inputs.insert(memrefOperands[1]);
+//       outputs.insert(memrefOperands[2]);
+//     }
+//   }
+//   else if (funcName.contains("Neg")) {
+//     if (memrefOperands.size() >= 2) {
+//       inputs.insert(memrefOperands[0]);
+//       outputs.insert(memrefOperands[1]);
+//     }
+//   }
+//   else {
+//     for (unsigned i = 0; i < memrefOperands.size(); ++i) {
+//       if (i == memrefOperands.size() - 1) {
+//         outputs.insert(memrefOperands[i]);
+//       } else {
+//         inputs.insert(memrefOperands[i]);
+//       }
+//     }
+//   }
+// }
+
 void extractCuLibsDependencies_plus(const llvm::SmallVector<Operation*, 4> &culibsOps,
                               llvm::SetVector<Value> &inputs,
                               llvm::SetVector<Value> &outputs) {
@@ -663,12 +909,16 @@ void extractCuLibsDependencies_plus(const llvm::SmallVector<Operation*, 4> &culi
         Value indexCastInput = indexCastOp->getOperand(0);
         if (auto extractOp = indexCastInput.getDefiningOp<mlir::memref::ExtractAlignedPointerAsIndexOp>()) {
           Value memref = extractOp.getSource();
-          memrefOperands.push_back(memref);
+          
+          // 新增：追踪到原始的 memref，处理 reinterpret_cast 等转换
+          Value sourceMemRef = traceMemRefSource_plus(memref);
+          memrefOperands.push_back(sourceMemRef);
         }
       }
     }
   }
   
+  // 保持原有的函数特定逻辑不变
   if (funcName.contains("Conv2dForward")) {
     if (memrefOperands.size() >= 4) {
       inputs.insert(memrefOperands[0]);
