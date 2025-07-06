@@ -24,6 +24,7 @@ add_onnx_mlir_library(OMMlirDialects
   HierarchicalParallelScheduler.cpp
   EliminateRedundantStreamSync.cpp
   InsertMainFunctionPass.cpp
+  AffineLoopFlattenPass.cpp
 
   DEPENDS
   OMKrnlIncGen
