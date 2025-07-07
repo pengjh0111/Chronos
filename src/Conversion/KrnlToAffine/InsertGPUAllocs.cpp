@@ -1,3 +1,419 @@
+// // #include "mlir/IR/Builders.h"
+// // #include "mlir/IR/Diagnostics.h"
+// // #include "mlir/IR/Operation.h"
+// // #include "mlir/IR/PatternMatch.h"
+// // #include "mlir/IR/OpDefinition.h"
+// // #include "mlir/Dialect/Func/IR/FuncOps.h"
+// // #include "mlir/Dialect/GPU/IR/GPUDialect.h"
+// // #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+// // #include "mlir/Dialect/MemRef/IR/MemRef.h"
+// // #include "mlir/Pass/Pass.h"
+
+// // #include "llvm/Support/ErrorHandling.h"
+
+// // using namespace mlir;
+
+// // namespace {
+  
+// // struct InsertGPUAllocPass 
+// //     : public PassWrapper<InsertGPUAllocPass, OperationPass<ModuleOp>> {
+// // public:
+// //     MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(InsertGPUAllocPass)
+// //   void runOnOperation() override;
+// //   StringRef getArgument() const final { return "insert-gpu-alloc"; }
+// //   StringRef getDescription() const final { 
+// //     return "Convert host-side memref.alloc, memref.reinterpret_cast, krnl.global, and gpu.alloc host_shared "
+// //            "to async gpu.alloc, and insert necessary async gpu.memcpy operations. "
+// //            "Adds explicit synchronization to decouple memory operations from compute operations. "
+// //            "Now includes scalar parameters in GPU memory conversion."; 
+// //   }
+// //   private:
+// //   // Member function declaration
+// //   Value processOperand(OpBuilder &builder, Location loc, Value operand, bool &needUpdateUsers);
+
+// //   // Global replacement map to avoid duplicate GPU allocations
+// //   DenseMap<Value, Value> replacementMap;
+// // };
+
+// // static Value createGpuAllocAndCopyAsync(OpBuilder &builder, Location loc, Value origVal,
+// //                                       ArrayRef<Value> dims, bool doCopy) {
+// //   // This pass does not support dynamic cases; if dims is not empty, report an error
+// //   if (!dims.empty()) {
+// //     llvm::report_fatal_error("InsertGPUAllocPass: Dynamic dimensions not supported");
+// //   }
+
+// //   auto origType = origVal.getType().cast<MemRefType>();
+  
+// //   if (!origType.getLayout().isIdentity()) {
+// //     llvm::report_fatal_error("InsertGPUAllocPass: Non-identity (non-contiguous) layouts are not supported");
+// //   }
+
+// //   auto allocType = MemRefType::get(
+// //       origType.getShape(), 
+// //       origType.getElementType(), 
+// //       /*use the original layout*/ origType.getLayout(),
+// //       origType.getMemorySpace());
+  
+// //   // Create an initial token
+// //   Value initialToken = builder.create<gpu::WaitOp>(
+// //       loc, 
+// //       builder.getType<gpu::AsyncTokenType>(),
+// //       ValueRange{}).getAsyncToken();
+  
+// //   // Insert the async gpu.alloc operation without host_shared flag
+// //   auto gpuAlloc = builder.create<gpu::AllocOp>(
+// //       loc, allocType, 
+// //       builder.getType<gpu::AsyncTokenType>(), // Return an async token
+// //       ValueRange{initialToken}, // Use the initial token
+// //       dims, /*symbolOperands=*/std::nullopt,
+// //       /*hostShared=*/false); // No host_shared flag
+  
+// //   Value allocResult = gpuAlloc.getResult(0);
+// //   Value allocToken = gpuAlloc.getAsyncToken();
+
+// //   // If a copy is needed, insert async gpu.memcpy operation
+// //   if (doCopy) {
+// //     auto memcpyOp = builder.create<gpu::MemcpyOp>(
+// //         loc, 
+// //         builder.getType<gpu::AsyncTokenType>(),
+// //         ValueRange{allocToken}, // Chain with allocation token
+// //         allocResult, origVal);
+    
+// //     // Update token to the memcpy token
+// //     allocToken = memcpyOp.getAsyncToken();
+// //   }
+  
+// //   // Add explicit synchronization point
+// //   builder.create<gpu::WaitOp>(loc, TypeRange{}, ValueRange{allocToken});
+  
+// //   // If the allocated type does not match the original type, insert a cast operation.
+// //   if (allocType != origType) {
+// //     allocResult = builder.create<memref::CastOp>(loc, origType, allocResult);
+// //   }
+  
+// //   return allocResult;
+// // }
+
+
+// // // 辅助函数：检查是否为标量操作函数
+// // static bool isScalarOperation(StringRef funcName) {
+// //   return funcName.contains("AddScalar") || 
+// //          funcName.contains("SubScalar") || 
+// //          funcName.contains("MulScalar") || 
+// //          funcName.contains("RSubScalar");
+// // }
+
+// // // 辅助函数：检查参数是否为标量参数（保留用于调试和日志记录）
+// // static bool isScalarParameter(func::CallOp callOp, Value paramValue) {
+// //   if (!isScalarOperation(callOp.getCallee())) {
+// //     return false;
+// //   }
+  
+// //   // 对于标量操作函数，第二个参数（index 1）是标量参数
+// //   // 函数签名：mgpuCudnnXXXScalar(input_ptr, scalar_ptr, output_ptr, n, c, h, w, stream)
+// //   auto operands = callOp.getOperands();
+  
+// //   // 需要追踪 extract_aligned_pointer -> index_cast -> inttoptr -> call operand 的链
+// //   // 找到该参数在call操作中的位置
+// //   for (unsigned i = 0; i < operands.size(); ++i) {
+// //     Value operand = operands[i];
+    
+// //     // 追踪指针操作链，看是否最终来源于我们关心的paramValue
+// //     Value currentVal = operand;
+    
+// //     // 反向追踪：inttoptr -> index_cast -> extract_aligned_pointer
+// //     if (auto intToPtrOp = currentVal.getDefiningOp<mlir::LLVM::IntToPtrOp>()) {
+// //       currentVal = intToPtrOp.getArg();
+      
+// //       if (auto indexCastOp = currentVal.getDefiningOp<mlir::arith::IndexCastOp>()) {
+// //         currentVal = indexCastOp->getOperand(0);
+        
+// //         if (auto extractOp = currentVal.getDefiningOp<mlir::memref::ExtractAlignedPointerAsIndexOp>()) {
+// //           Value sourceMemref = extractOp.getSource();
+          
+// //           // 检查源memref是否与我们的paramValue匹配
+// //           if (sourceMemref == paramValue) {
+// //             // 找到了参数位置，检查是否为标量参数位置
+// //             // 标量参数通常在第二个位置（index 1）
+// //             return (i == 1);
+// //           }
+// //         }
+// //       }
+// //     }
+// //   }
+  
+// //   return false;
+// // }
+
+// // /// Process an operand: For operands produced by memref.alloc, memref.reinterpret_cast, "krnl.global",
+// // /// or gpu.alloc host_shared, call createGpuAllocAndCopyAsync as appropriate to obtain a GPU memory variable.
+// // Value InsertGPUAllocPass::processOperand(OpBuilder &builder, Location loc, Value operand, bool &needUpdateUsers) {
+// //   Operation *defOp = operand.getDefiningOp();
+
+// //   // Check if we already have a replacement for this value
+// //   if (replacementMap.count(operand)) {
+// //     needUpdateUsers = false;
+// //     return replacementMap[operand];
+// //   }
+
+// //   llvm::SmallVector<Value, 4> dims;
+// //   if (auto memType = operand.getType().dyn_cast<MemRefType>()) {
+// //     for (unsigned i = 0, e = memType.getRank(); i < e; ++i) {
+// //       if (memType.isDynamicDim(i))
+// //         dims.push_back(builder.create<memref::DimOp>(loc, operand, i));
+// //     }
+// //     if (!dims.empty())
+// //       llvm::report_fatal_error("InsertGPUAllocsPass: Dynamic dimensions not supported");
+// //   }
+
+// //   if (defOp && (isa<memref::AllocOp>(defOp) ||
+// //                 isa<memref::ReinterpretCastOp>(defOp) ||
+// //                 defOp->getName().getStringRef() == "krnl.global" ||
+// //                 (isa<gpu::AllocOp>(defOp) && cast<gpu::AllocOp>(defOp).getHostShared()))) {
+// //     bool doCopy = false;
+    
+// //     // For krnl.global or reinterpret_cast, need to copy data
+// //     if (defOp->getName().getStringRef() == "krnl.global" || isa<memref::ReinterpretCastOp>(defOp)) {
+// //       doCopy = true;
+// //     }
+    
+// //     // For memref.alloc and gpu.alloc host_shared, update insertion point to function start
+// //     if (isa<memref::AllocOp>(defOp) || (isa<gpu::AllocOp>(defOp) && cast<gpu::AllocOp>(defOp).getHostShared())) {
+// //       auto funcOp = defOp->getParentOfType<func::FuncOp>();
+// //       if (!funcOp || funcOp.isExternal() || funcOp.getBody().empty()) {
+// //         // Skip external functions or functions without a body
+// //         needUpdateUsers = false;
+// //         return operand;
+// //       }
+// //       builder.setInsertionPointToStart(&funcOp.getBody().front());
+// //       needUpdateUsers = true;
+// //     } else {
+// //       // For krnl.global, set insertion point after the op
+// //       if (defOp->getName().getStringRef() == "krnl.global") {
+// //         builder.setInsertionPointAfter(defOp);
+// //       }
+// //       needUpdateUsers = false;
+// //     }
+    
+// //     // Create async GPU allocation and copy if needed with explicit synchronization
+// //     Value newVal = createGpuAllocAndCopyAsync(builder, loc, operand, dims, doCopy);
+    
+// //     // Store the replacement in the map
+// //     replacementMap[operand] = newVal;
+    
+// //     return newVal;
+// //   }
+
+// //   // In all other cases, return the original value directly.
+// //   needUpdateUsers = false;
+// //   return operand;
+// // }
+
+// // void InsertGPUAllocPass::runOnOperation() {
+// //   ModuleOp module = getOperation();
+// //   OpBuilder builder(module.getContext());
+
+// //   // Clear the replacement map
+// //   replacementMap.clear();
+
+// //   // First pass: Process all functions to handle memory allocations at function start
+// //   module.walk([&](func::FuncOp funcOp) {
+// //     // Skip external functions (functions without a body)
+// //     if (funcOp.isExternal() || funcOp.getBody().empty())
+// //       return;
+    
+// //     builder.setInsertionPointToStart(&funcOp.getBody().front());
+    
+// //     // Process gpu.launch_func operations
+// //     llvm::SmallVector<gpu::LaunchFuncOp, 8> launchOps;
+// //     funcOp.walk([&](gpu::LaunchFuncOp op) {
+// //       launchOps.push_back(op);
+// //     });
+    
+// //     for (auto launchOp : launchOps) {
+// //       auto operands = launchOp.getOperands();
+// //       llvm::SmallVector<Value, 4> newOperands;
+// //       bool launchChanged = false;
+
+// //       // Process each operand
+// //       for (Value operand : operands) {
+// //         bool updateUsers = false;
+// //         Operation *defOp = operand.getDefiningOp();
+// //         if (defOp && (isa<memref::AllocOp>(defOp) ||
+// //                     isa<memref::ReinterpretCastOp>(defOp) ||
+// //                     defOp->getName().getStringRef() == "krnl.global" ||
+// //                     (isa<gpu::AllocOp>(defOp) && cast<gpu::AllocOp>(defOp).getHostShared()))) {
+          
+// //           // Process the operand, getting new GPU memory value
+// //           Value newVal = processOperand(builder, launchOp.getLoc(), operand, updateUsers);
+          
+// //           newOperands.push_back(newVal);
+// //           launchChanged = true;
+          
+// //           // If updating users is needed (for memref.alloc or gpu.alloc host_shared)
+// //           if (updateUsers) {
+// //             // Replace all users of the original allocation
+// //             SmallVector<OpOperand*, 8> operandUses;
+// //             for (OpOperand &use : operand.getUses())
+// //               operandUses.push_back(&use);
+// //             for (OpOperand *use : operandUses) {
+// //               use->set(newVal);
+// //             }
+// //             // Erase the original allocation op
+// //             defOp->erase();
+// //           }
+// //         } else {
+// //           newOperands.push_back(operand);
+// //         }
+// //       }
+      
+// //       // Only update the operands if they changed
+// //       if (launchChanged) {
+// //         launchOp.getOperation()->setOperands(newOperands);
+// //       }
+// //     }
+// //   });
+
+// //   // Second pass: Handle memref.extract_aligned_pointer_as_index operations for CUDA library calls
+// //   module.walk([&](memref::ExtractAlignedPointerAsIndexOp extractOp) {
+// //     Value memref = extractOp.getSource();
+// //     Operation *defOp = memref.getDefiningOp();
+    
+// //     // Check if this memref comes from krnl.global, memref.alloc or gpu.alloc with host_shared
+// //     bool isTargetOp = false;
+    
+// //     if (defOp) {
+// //       if (defOp->getName().getStringRef() == "krnl.global" || 
+// //           isa<memref::AllocOp>(defOp) ||
+// //           (isa<gpu::AllocOp>(defOp) && cast<gpu::AllocOp>(defOp).getHostShared())) {
+// //         isTargetOp = true;
+// //       }
+// //     }
+    
+// //     if (isTargetOp) {
+// //       // Check if we've already created a replacement for this value
+// //       if (replacementMap.count(memref)) {
+// //         extractOp.setOperand(replacementMap[memref]);  // Use GPU memory
+// //         return;
+// //       }
+      
+// //       // Check if the result flows into a CUDA library call
+// //       bool flowsToGpuLibCall = false;
+// //       bool isScalarParam = false;  // 保留用于调试和日志记录
+      
+// //       for (Operation *user : extractOp->getResult(0).getUsers()) {
+// //         // Trace through inttoptr and index_cast operations
+// //         Operation* currentUser = user;
+// //         while (currentUser && (isa<arith::IndexCastOp>(currentUser) || currentUser->getName().getStringRef() == "llvm.inttoptr")) {
+// //           if (currentUser->getNumResults() > 0 && !currentUser->getResult(0).getUses().empty()) {
+// //             currentUser = *currentUser->getResult(0).getUsers().begin();
+// //           } else {
+// //             break;
+// //           }
+// //         }
+        
+// //         // Check if we reached a call operation to a CUDA library function
+// //         if (currentUser && isa<func::CallOp>(currentUser)) {
+// //           auto callOp = cast<func::CallOp>(currentUser);
+// //           if (callOp.getCallee().starts_with("mgpuCudnn") || 
+// //               callOp.getCallee().starts_with("mgpuCulibs") ||
+// //               callOp.getCallee().starts_with("mgpu")) {
+// //             flowsToGpuLibCall = true;
+            
+// //             // 检查是否为标量参数（用于调试和日志记录）
+// //             isScalarParam = isScalarParameter(callOp, memref);
+            
+// //             break;
+// //           }
+// //         }
+// //       }
+      
+// //       // 修改：现在所有流向GPU库调用的参数都进行GPU内存转换，包括标量
+// //       if (flowsToGpuLibCall) {
+// //         // For gpu.alloc host_shared, replace directly
+// //         if (auto gpuAllocOp = dyn_cast_or_null<gpu::AllocOp>(defOp)) {
+// //           if (gpuAllocOp.getHostShared()) {
+// //             auto funcOp = gpuAllocOp->getParentOfType<func::FuncOp>();
+// //             if (!funcOp) {
+// //               llvm::report_fatal_error("gpu.alloc op is not within a function");
+// //             }
+            
+// //             // Move replacement to the start of the function
+// //             builder.setInsertionPointToStart(&funcOp.getBody().front());
+            
+// //             // Create new async GPU allocation without host_shared
+// //             Value initialToken = builder.create<gpu::WaitOp>(
+// //                 gpuAllocOp.getLoc(),
+// //                 builder.getType<gpu::AsyncTokenType>(),
+// //                 ValueRange{}).getAsyncToken();
+                
+// //             auto newGpuAlloc = builder.create<gpu::AllocOp>(
+// //                 gpuAllocOp.getLoc(),
+// //                 gpuAllocOp.getMemref().getType(),
+// //                 builder.getType<gpu::AsyncTokenType>(),
+// //                 ValueRange{initialToken},
+// //                 gpuAllocOp.getDynamicSizes(),
+// //                 gpuAllocOp.getSymbolOperands(),
+// //                 /*hostShared=*/false);
+            
+// //             // Add explicit synchronization 
+// //             builder.create<gpu::WaitOp>(
+// //                 gpuAllocOp.getLoc(), 
+// //                 TypeRange{}, 
+// //                 ValueRange{newGpuAlloc.getAsyncToken()});
+            
+// //             // Replace and store in map
+// //             Value newMem = newGpuAlloc.getMemref();
+// //             replacementMap[memref] = newMem;
+            
+// //             // Replace all uses
+// //             gpuAllocOp.getMemref().replaceAllUsesWith(newMem);
+// //             gpuAllocOp.erase();
+            
+// //             // Update the extract op
+// //             extractOp.setOperand(newMem);
+// //           }
+// //         } else {
+// //           // For memref.alloc or krnl.global, process at function start
+// //           auto funcOp = extractOp->getParentOfType<func::FuncOp>();
+// //           if (!funcOp) {
+// //             llvm::report_fatal_error("extract operation is not within a function");
+// //           }
+          
+// //           builder.setInsertionPointToStart(&funcOp.getBody().front());
+          
+// //           // Process the operand to create GPU memory
+// //           bool updateUsers = false;
+// //           Value gpuMem = processOperand(builder, extractOp.getLoc(), memref, updateUsers);
+          
+// //           // Replace the operand of the extract operation
+// //           extractOp.setOperand(gpuMem);
+          
+// //           // Handle memref.alloc replacement if needed
+// //           if (updateUsers && isa<memref::AllocOp>(defOp)) {
+// //             defOp->getResult(0).replaceAllUsesWith(gpuMem);
+// //             defOp->erase();
+// //           }
+// //         }
+// //       }
+// //     }
+// //   });
+// // }
+
+// // } // end anonymous namespace
+
+// // namespace onnx_mlir {
+// //   namespace krnl {
+  
+// //   std::unique_ptr<mlir::Pass> createInsertGPUAllocPass() {
+// //       return std::make_unique<InsertGPUAllocPass>();
+// //   }
+  
+// //   } // namespace krnl
+// // } // namespace onnx_mlir
+  
+// // static mlir::PassRegistration<InsertGPUAllocPass> pass;
+
 // #include "mlir/IR/Builders.h"
 // #include "mlir/IR/Diagnostics.h"
 // #include "mlir/IR/Operation.h"
@@ -8,6 +424,7 @@
 // #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 // #include "mlir/Dialect/MemRef/IR/MemRef.h"
 // #include "mlir/Pass/Pass.h"
+// #include "mlir/Dialect/Arith/IR/Arith.h"
 
 // #include "llvm/Support/ErrorHandling.h"
 
@@ -22,14 +439,15 @@
 //   void runOnOperation() override;
 //   StringRef getArgument() const final { return "insert-gpu-alloc"; }
 //   StringRef getDescription() const final { 
-//     return "Convert host-side memref.alloc, memref.reinterpret_cast, krnl.global, and gpu.alloc host_shared "
+//     return "Convert host-side memref.alloc, memref.reinterpret_cast, krnl.global, memref.get_global, and gpu.alloc host_shared "
 //            "to async gpu.alloc, and insert necessary async gpu.memcpy operations. "
 //            "Adds explicit synchronization to decouple memory operations from compute operations. "
-//            "Now includes scalar parameters in GPU memory conversion."; 
+//            "Now includes scalar parameters in GPU memory conversion and scalar constant optimization."; 
 //   }
 //   private:
 //   // Member function declaration
 //   Value processOperand(OpBuilder &builder, Location loc, Value operand, bool &needUpdateUsers);
+//   Value processScalarConstant(OpBuilder &builder, Location loc, Value operand);
 
 //   // Global replacement map to avoid duplicate GPU allocations
 //   DenseMap<Value, Value> replacementMap;
@@ -145,8 +563,170 @@
 //   return false;
 // }
 
+// // Value InsertGPUAllocPass::processScalarConstant(OpBuilder &builder, Location loc, Value operand) {
+// //   // 检查操作数是否为f32或f16标量类型
+// //   if (auto floatType = operand.getType().dyn_cast<FloatType>()) {
+// //     if (floatType.isF32() || floatType.isF16()) {
+// //       // 检查是否来自memref.load
+// //       if (auto loadOp = operand.getDefiningOp<memref::LoadOp>()) {
+// //         Value memref = loadOp.getMemref();
+        
+// //         // 检查memref是否来自krnl.global
+// //         if (auto defOp = memref.getDefiningOp()) {
+// //           if (defOp->getName().getStringRef() == "krnl.global") {
+// //             // 尝试提取krnl.global的常量值
+// //             if (auto valueAttr = defOp->getAttrOfType<mlir::Attribute>("value")) {
+// //               if (auto denseAttr = valueAttr.dyn_cast<DenseElementsAttr>()) {
+// //                 // 检查是否为标量常量（shape为空）
+// //                 if (denseAttr.getType().getRank() == 0) {
+// //                   // 提取标量值
+// //                   if (floatType.isF32()) {
+// //                     float scalarValue = denseAttr.getSplatValue<APFloat>().convertToFloat();
+// //                     // 创建arith.constant替换memref.load
+// //                     Value constantOp = builder.create<arith::ConstantFloatOp>(
+// //                         loc, llvm::APFloat(scalarValue), floatType);
+                    
+// //                     // 替换所有使用该load操作的地方
+// //                     loadOp.getResult().replaceAllUsesWith(constantOp);
+// //                     loadOp.erase();
+                    
+// //                     return constantOp;
+// //                   } else if (floatType.isF16()) {
+// //                     // 处理f16情况
+// //                     float scalarValue = denseAttr.getSplatValue<APFloat>().convertToFloat();
+// //                     Value constantOp = builder.create<arith::ConstantFloatOp>(
+// //                         loc, llvm::APFloat(scalarValue), floatType);
+                    
+// //                     // 替换所有使用该load操作的地方
+// //                     loadOp.getResult().replaceAllUsesWith(constantOp);
+// //                     loadOp.erase();
+                    
+// //                     return constantOp;
+// //                   }
+// //                 }
+// //               }
+// //             }
+// //           }
+// //         }
+// //       }
+// //     }
+// //   }
+  
+// //   // 如果不符合条件，返回原始操作数
+// //   return operand;
+// // }
+
+// Value InsertGPUAllocPass::processScalarConstant(OpBuilder &builder, Location loc, Value operand) {
+//   // 检查操作数是否为f32或f16标量类型
+//   if (auto floatType = operand.getType().dyn_cast<FloatType>()) {
+//     if (floatType.isF32() || floatType.isF16()) {
+//       // 检查是否来自memref.load
+//       if (auto loadOp = operand.getDefiningOp<memref::LoadOp>()) {
+//         Value memref = loadOp.getMemref();
+        
+//         // 检查memref是否来自krnl.global
+//         if (auto defOp = memref.getDefiningOp()) {
+//           if (defOp->getName().getStringRef() == "krnl.global") {
+//             // 尝试提取krnl.global的常量值
+//             if (auto valueAttr = defOp->getAttrOfType<mlir::Attribute>("value")) {
+//               if (auto denseAttr = valueAttr.dyn_cast<DenseElementsAttr>()) {
+//                 // 检查是否为标量常量（shape为空）
+//                 if (denseAttr.getType().getRank() == 0) {
+//                   // 直接使用DenseElementsAttr中的APFloat，它已经具有正确的精度
+//                   APFloat originalValue = denseAttr.getSplatValue<APFloat>();
+                  
+//                   // 创建arith.constant替换memref.load
+//                   Value constantOp = builder.create<arith::ConstantFloatOp>(
+//                       loc, originalValue, floatType);
+                  
+//                   // 替换所有使用该load操作的地方
+//                   loadOp.getResult().replaceAllUsesWith(constantOp);
+//                   loadOp.erase();
+                  
+//                   return constantOp;
+//                 }
+//               }
+//             }
+//           }
+//         }
+//       }
+//     }
+//   }
+  
+//   // 如果不符合条件，返回原始操作数
+//   return operand;
+// }
+
+// // /// Process an operand: For operands produced by memref.alloc, memref.reinterpret_cast, "krnl.global",
+// // /// memref.get_global, or gpu.alloc host_shared, call createGpuAllocAndCopyAsync as appropriate to obtain a GPU memory variable.
+// // Value InsertGPUAllocPass::processOperand(OpBuilder &builder, Location loc, Value operand, bool &needUpdateUsers) {
+// //   Operation *defOp = operand.getDefiningOp();
+
+// //   // Check if we already have a replacement for this value
+// //   if (replacementMap.count(operand)) {
+// //     needUpdateUsers = false;
+// //     return replacementMap[operand];
+// //   }
+
+// //   llvm::SmallVector<Value, 4> dims;
+// //   if (auto memType = operand.getType().dyn_cast<MemRefType>()) {
+// //     for (unsigned i = 0, e = memType.getRank(); i < e; ++i) {
+// //       if (memType.isDynamicDim(i))
+// //         dims.push_back(builder.create<memref::DimOp>(loc, operand, i));
+// //     }
+// //     if (!dims.empty())
+// //       llvm::report_fatal_error("InsertGPUAllocsPass: Dynamic dimensions not supported");
+// //   }
+
+// //   if (defOp && (isa<memref::AllocOp>(defOp) ||
+// //                 isa<memref::ReinterpretCastOp>(defOp) ||
+// //                 isa<memref::GetGlobalOp>(defOp) ||
+// //                 defOp->getName().getStringRef() == "krnl.global" ||
+// //                 (isa<gpu::AllocOp>(defOp) && cast<gpu::AllocOp>(defOp).getHostShared()))) {
+// //     bool doCopy = false;
+    
+// //     // For krnl.global, reinterpret_cast, or get_global, need to copy data
+// //     if (defOp->getName().getStringRef() == "krnl.global" || 
+// //         isa<memref::ReinterpretCastOp>(defOp) ||
+// //         isa<memref::GetGlobalOp>(defOp)) {
+// //       doCopy = true;
+// //     }
+    
+// //     // For memref.alloc and gpu.alloc host_shared, update insertion point to function start
+// //     if (isa<memref::AllocOp>(defOp) || (isa<gpu::AllocOp>(defOp) && cast<gpu::AllocOp>(defOp).getHostShared())) {
+// //       auto funcOp = defOp->getParentOfType<func::FuncOp>();
+// //       if (!funcOp || funcOp.isExternal() || funcOp.getBody().empty()) {
+// //         // Skip external functions or functions without a body
+// //         needUpdateUsers = false;
+// //         return operand;
+// //       }
+// //       builder.setInsertionPointToStart(&funcOp.getBody().front());
+// //       needUpdateUsers = true;
+// //     } else {
+// //       // For krnl.global or get_global, set insertion point after the op
+// //       if (defOp->getName().getStringRef() == "krnl.global" || isa<memref::GetGlobalOp>(defOp)) {
+// //         builder.setInsertionPointAfter(defOp);
+// //       }
+// //       needUpdateUsers = false;
+// //     }
+    
+// //     // Create async GPU allocation and copy if needed with explicit synchronization
+// //     Value newVal = createGpuAllocAndCopyAsync(builder, loc, operand, dims, doCopy);
+    
+// //     // Store the replacement in the map
+// //     replacementMap[operand] = newVal;
+    
+// //     return newVal;
+// //   }
+
+// //   // In all other cases, return the original value directly.
+// //   needUpdateUsers = false;
+// //   return operand;
+// // }
+
+
 // /// Process an operand: For operands produced by memref.alloc, memref.reinterpret_cast, "krnl.global",
-// /// or gpu.alloc host_shared, call createGpuAllocAndCopyAsync as appropriate to obtain a GPU memory variable.
+// /// memref.get_global, or gpu.alloc host_shared, call createGpuAllocAndCopyAsync as appropriate to obtain a GPU memory variable.
 // Value InsertGPUAllocPass::processOperand(OpBuilder &builder, Location loc, Value operand, bool &needUpdateUsers) {
 //   Operation *defOp = operand.getDefiningOp();
 
@@ -154,6 +734,31 @@
 //   if (replacementMap.count(operand)) {
 //     needUpdateUsers = false;
 //     return replacementMap[operand];
+//   }
+
+//   // Handle memref.reinterpret_cast specially
+//   if (defOp && isa<memref::ReinterpretCastOp>(defOp)) {
+//     auto reinterpretOp = cast<memref::ReinterpretCastOp>(defOp);
+//     Value sourceOperand = reinterpretOp.getSource();
+    
+//     // Recursively process the source operand
+//     bool sourceNeedUpdateUsers = false;
+//     Value newSource = processOperand(builder, loc, sourceOperand, sourceNeedUpdateUsers);
+    
+//     // If the source was converted to GPU memory, update the reinterpret_cast operand
+//     if (newSource != sourceOperand) {
+//       // Directly modify the existing reinterpret_cast operation's operand
+//       reinterpretOp.getOperation()->setOperand(0, newSource);
+      
+//       // Store in replacement map
+//       replacementMap[operand] = operand; // The result is still the same Value
+//       needUpdateUsers = false;
+//       return operand; // Return the original result, but now it operates on GPU memory
+//     } else {
+//       // Source wasn't converted, return original
+//       needUpdateUsers = false;
+//       return operand;
+//     }
 //   }
 
 //   llvm::SmallVector<Value, 4> dims;
@@ -167,13 +772,14 @@
 //   }
 
 //   if (defOp && (isa<memref::AllocOp>(defOp) ||
-//                 isa<memref::ReinterpretCastOp>(defOp) ||
+//                 isa<memref::GetGlobalOp>(defOp) ||
 //                 defOp->getName().getStringRef() == "krnl.global" ||
 //                 (isa<gpu::AllocOp>(defOp) && cast<gpu::AllocOp>(defOp).getHostShared()))) {
 //     bool doCopy = false;
     
-//     // For krnl.global or reinterpret_cast, need to copy data
-//     if (defOp->getName().getStringRef() == "krnl.global" || isa<memref::ReinterpretCastOp>(defOp)) {
+//     // For krnl.global or get_global, need to copy data
+//     if (defOp->getName().getStringRef() == "krnl.global" || 
+//         isa<memref::GetGlobalOp>(defOp)) {
 //       doCopy = true;
 //     }
     
@@ -188,8 +794,8 @@
 //       builder.setInsertionPointToStart(&funcOp.getBody().front());
 //       needUpdateUsers = true;
 //     } else {
-//       // For krnl.global, set insertion point after the op
-//       if (defOp->getName().getStringRef() == "krnl.global") {
+//       // For krnl.global or get_global, set insertion point after the op
+//       if (defOp->getName().getStringRef() == "krnl.global" || isa<memref::GetGlobalOp>(defOp)) {
 //         builder.setInsertionPointAfter(defOp);
 //       }
 //       needUpdateUsers = false;
@@ -238,9 +844,19 @@
 //       // Process each operand
 //       for (Value operand : operands) {
 //         bool updateUsers = false;
+
+//         Value processedOperand = processScalarConstant(builder, launchOp.getLoc(), operand);
+//         if (processedOperand != operand) {
+//           // 如果进行了标量常量优化，使用新的常量值
+//           newOperands.push_back(processedOperand);
+//           launchChanged = true;
+//           continue;
+//         }
+
 //         Operation *defOp = operand.getDefiningOp();
 //         if (defOp && (isa<memref::AllocOp>(defOp) ||
 //                     isa<memref::ReinterpretCastOp>(defOp) ||
+//                     isa<memref::GetGlobalOp>(defOp) ||
 //                     defOp->getName().getStringRef() == "krnl.global" ||
 //                     (isa<gpu::AllocOp>(defOp) && cast<gpu::AllocOp>(defOp).getHostShared()))) {
           
@@ -279,12 +895,13 @@
 //     Value memref = extractOp.getSource();
 //     Operation *defOp = memref.getDefiningOp();
     
-//     // Check if this memref comes from krnl.global, memref.alloc or gpu.alloc with host_shared
+//     // Check if this memref comes from krnl.global, memref.alloc, memref.get_global or gpu.alloc with host_shared
 //     bool isTargetOp = false;
     
 //     if (defOp) {
 //       if (defOp->getName().getStringRef() == "krnl.global" || 
 //           isa<memref::AllocOp>(defOp) ||
+//           isa<memref::GetGlobalOp>(defOp) ||
 //           (isa<gpu::AllocOp>(defOp) && cast<gpu::AllocOp>(defOp).getHostShared())) {
 //         isTargetOp = true;
 //       }
@@ -374,7 +991,7 @@
 //             extractOp.setOperand(newMem);
 //           }
 //         } else {
-//           // For memref.alloc or krnl.global, process at function start
+//           // For memref.alloc, memref.get_global or krnl.global, process at function start
 //           auto funcOp = extractOp->getParentOfType<func::FuncOp>();
 //           if (!funcOp) {
 //             llvm::report_fatal_error("extract operation is not within a function");
@@ -448,6 +1065,21 @@ public:
   // Member function declaration
   Value processOperand(OpBuilder &builder, Location loc, Value operand, bool &needUpdateUsers);
   Value processScalarConstant(OpBuilder &builder, Location loc, Value operand);
+  
+  // 新增：追踪通过reinterpret_cast链找到最终源操作
+  std::pair<Value, Operation*> traceSourceThroughReinterpretCast(Value memref) {
+    Value currentMemref = memref;
+    Operation* currentDefOp = currentMemref.getDefiningOp();
+    
+    // 追踪reinterpret_cast链直到找到非reinterpret_cast的源操作
+    while (currentDefOp && isa<memref::ReinterpretCastOp>(currentDefOp)) {
+      auto reinterpretOp = cast<memref::ReinterpretCastOp>(currentDefOp);
+      currentMemref = reinterpretOp.getSource();
+      currentDefOp = currentMemref.getDefiningOp();
+    }
+    
+    return {currentMemref, currentDefOp};
+  }
 
   // Global replacement map to avoid duplicate GPU allocations
   DenseMap<Value, Value> replacementMap;
@@ -563,59 +1195,6 @@ static bool isScalarParameter(func::CallOp callOp, Value paramValue) {
   return false;
 }
 
-// Value InsertGPUAllocPass::processScalarConstant(OpBuilder &builder, Location loc, Value operand) {
-//   // 检查操作数是否为f32或f16标量类型
-//   if (auto floatType = operand.getType().dyn_cast<FloatType>()) {
-//     if (floatType.isF32() || floatType.isF16()) {
-//       // 检查是否来自memref.load
-//       if (auto loadOp = operand.getDefiningOp<memref::LoadOp>()) {
-//         Value memref = loadOp.getMemref();
-        
-//         // 检查memref是否来自krnl.global
-//         if (auto defOp = memref.getDefiningOp()) {
-//           if (defOp->getName().getStringRef() == "krnl.global") {
-//             // 尝试提取krnl.global的常量值
-//             if (auto valueAttr = defOp->getAttrOfType<mlir::Attribute>("value")) {
-//               if (auto denseAttr = valueAttr.dyn_cast<DenseElementsAttr>()) {
-//                 // 检查是否为标量常量（shape为空）
-//                 if (denseAttr.getType().getRank() == 0) {
-//                   // 提取标量值
-//                   if (floatType.isF32()) {
-//                     float scalarValue = denseAttr.getSplatValue<APFloat>().convertToFloat();
-//                     // 创建arith.constant替换memref.load
-//                     Value constantOp = builder.create<arith::ConstantFloatOp>(
-//                         loc, llvm::APFloat(scalarValue), floatType);
-                    
-//                     // 替换所有使用该load操作的地方
-//                     loadOp.getResult().replaceAllUsesWith(constantOp);
-//                     loadOp.erase();
-                    
-//                     return constantOp;
-//                   } else if (floatType.isF16()) {
-//                     // 处理f16情况
-//                     float scalarValue = denseAttr.getSplatValue<APFloat>().convertToFloat();
-//                     Value constantOp = builder.create<arith::ConstantFloatOp>(
-//                         loc, llvm::APFloat(scalarValue), floatType);
-                    
-//                     // 替换所有使用该load操作的地方
-//                     loadOp.getResult().replaceAllUsesWith(constantOp);
-//                     loadOp.erase();
-                    
-//                     return constantOp;
-//                   }
-//                 }
-//               }
-//             }
-//           }
-//         }
-//       }
-//     }
-//   }
-  
-//   // 如果不符合条件，返回原始操作数
-//   return operand;
-// }
-
 Value InsertGPUAllocPass::processScalarConstant(OpBuilder &builder, Location loc, Value operand) {
   // 检查操作数是否为f32或f16标量类型
   if (auto floatType = operand.getType().dyn_cast<FloatType>()) {
@@ -656,74 +1235,6 @@ Value InsertGPUAllocPass::processScalarConstant(OpBuilder &builder, Location loc
   // 如果不符合条件，返回原始操作数
   return operand;
 }
-
-// /// Process an operand: For operands produced by memref.alloc, memref.reinterpret_cast, "krnl.global",
-// /// memref.get_global, or gpu.alloc host_shared, call createGpuAllocAndCopyAsync as appropriate to obtain a GPU memory variable.
-// Value InsertGPUAllocPass::processOperand(OpBuilder &builder, Location loc, Value operand, bool &needUpdateUsers) {
-//   Operation *defOp = operand.getDefiningOp();
-
-//   // Check if we already have a replacement for this value
-//   if (replacementMap.count(operand)) {
-//     needUpdateUsers = false;
-//     return replacementMap[operand];
-//   }
-
-//   llvm::SmallVector<Value, 4> dims;
-//   if (auto memType = operand.getType().dyn_cast<MemRefType>()) {
-//     for (unsigned i = 0, e = memType.getRank(); i < e; ++i) {
-//       if (memType.isDynamicDim(i))
-//         dims.push_back(builder.create<memref::DimOp>(loc, operand, i));
-//     }
-//     if (!dims.empty())
-//       llvm::report_fatal_error("InsertGPUAllocsPass: Dynamic dimensions not supported");
-//   }
-
-//   if (defOp && (isa<memref::AllocOp>(defOp) ||
-//                 isa<memref::ReinterpretCastOp>(defOp) ||
-//                 isa<memref::GetGlobalOp>(defOp) ||
-//                 defOp->getName().getStringRef() == "krnl.global" ||
-//                 (isa<gpu::AllocOp>(defOp) && cast<gpu::AllocOp>(defOp).getHostShared()))) {
-//     bool doCopy = false;
-    
-//     // For krnl.global, reinterpret_cast, or get_global, need to copy data
-//     if (defOp->getName().getStringRef() == "krnl.global" || 
-//         isa<memref::ReinterpretCastOp>(defOp) ||
-//         isa<memref::GetGlobalOp>(defOp)) {
-//       doCopy = true;
-//     }
-    
-//     // For memref.alloc and gpu.alloc host_shared, update insertion point to function start
-//     if (isa<memref::AllocOp>(defOp) || (isa<gpu::AllocOp>(defOp) && cast<gpu::AllocOp>(defOp).getHostShared())) {
-//       auto funcOp = defOp->getParentOfType<func::FuncOp>();
-//       if (!funcOp || funcOp.isExternal() || funcOp.getBody().empty()) {
-//         // Skip external functions or functions without a body
-//         needUpdateUsers = false;
-//         return operand;
-//       }
-//       builder.setInsertionPointToStart(&funcOp.getBody().front());
-//       needUpdateUsers = true;
-//     } else {
-//       // For krnl.global or get_global, set insertion point after the op
-//       if (defOp->getName().getStringRef() == "krnl.global" || isa<memref::GetGlobalOp>(defOp)) {
-//         builder.setInsertionPointAfter(defOp);
-//       }
-//       needUpdateUsers = false;
-//     }
-    
-//     // Create async GPU allocation and copy if needed with explicit synchronization
-//     Value newVal = createGpuAllocAndCopyAsync(builder, loc, operand, dims, doCopy);
-    
-//     // Store the replacement in the map
-//     replacementMap[operand] = newVal;
-    
-//     return newVal;
-//   }
-
-//   // In all other cases, return the original value directly.
-//   needUpdateUsers = false;
-//   return operand;
-// }
-
 
 /// Process an operand: For operands produced by memref.alloc, memref.reinterpret_cast, "krnl.global",
 /// memref.get_global, or gpu.alloc host_shared, call createGpuAllocAndCopyAsync as appropriate to obtain a GPU memory variable.
@@ -893,24 +1404,33 @@ void InsertGPUAllocPass::runOnOperation() {
   // Second pass: Handle memref.extract_aligned_pointer_as_index operations for CUDA library calls
   module.walk([&](memref::ExtractAlignedPointerAsIndexOp extractOp) {
     Value memref = extractOp.getSource();
-    Operation *defOp = memref.getDefiningOp();
     
-    // Check if this memref comes from krnl.global, memref.alloc, memref.get_global or gpu.alloc with host_shared
+    // 使用新的追踪函数找到最终源操作
+    auto [ultimateMemref, ultimateDefOp] = traceSourceThroughReinterpretCast(memref);
+    
+    // Check if the ultimate source comes from krnl.global, memref.alloc, memref.get_global or gpu.alloc with host_shared
     bool isTargetOp = false;
     
-    if (defOp) {
-      if (defOp->getName().getStringRef() == "krnl.global" || 
-          isa<memref::AllocOp>(defOp) ||
-          isa<memref::GetGlobalOp>(defOp) ||
-          (isa<gpu::AllocOp>(defOp) && cast<gpu::AllocOp>(defOp).getHostShared())) {
+    if (ultimateDefOp) {
+      if (ultimateDefOp->getName().getStringRef() == "krnl.global" || 
+          isa<memref::AllocOp>(ultimateDefOp) ||
+          isa<memref::GetGlobalOp>(ultimateDefOp) ||
+          (isa<gpu::AllocOp>(ultimateDefOp) && cast<gpu::AllocOp>(ultimateDefOp).getHostShared())) {
         isTargetOp = true;
       }
     }
     
     if (isTargetOp) {
-      // Check if we've already created a replacement for this value
-      if (replacementMap.count(memref)) {
-        extractOp.setOperand(replacementMap[memref]);  // Use GPU memory
+      // Check if we've already created a replacement for the ultimate source
+      if (replacementMap.count(ultimateMemref)) {
+        // 如果原始memref经过了reinterpret_cast，需要使用processOperand来正确处理
+        if (memref != ultimateMemref) {
+          bool needUpdateUsers = false;
+          Value processedMemref = processOperand(builder, extractOp.getLoc(), memref, needUpdateUsers);
+          extractOp.setOperand(processedMemref);
+        } else {
+          extractOp.setOperand(replacementMap[ultimateMemref]);
+        }
         return;
       }
       
@@ -938,17 +1458,17 @@ void InsertGPUAllocPass::runOnOperation() {
             flowsToGpuLibCall = true;
             
             // 检查是否为标量参数（用于调试和日志记录）
-            isScalarParam = isScalarParameter(callOp, memref);
+            isScalarParam = isScalarParameter(callOp, ultimateMemref);
             
             break;
           }
         }
       }
       
-      // 修改：现在所有流向GPU库调用的参数都进行GPU内存转换，包括标量
+      // 现在所有流向GPU库调用的参数都进行GPU内存转换
       if (flowsToGpuLibCall) {
         // For gpu.alloc host_shared, replace directly
-        if (auto gpuAllocOp = dyn_cast_or_null<gpu::AllocOp>(defOp)) {
+        if (auto gpuAllocOp = dyn_cast_or_null<gpu::AllocOp>(ultimateDefOp)) {
           if (gpuAllocOp.getHostShared()) {
             auto funcOp = gpuAllocOp->getParentOfType<func::FuncOp>();
             if (!funcOp) {
@@ -981,14 +1501,20 @@ void InsertGPUAllocPass::runOnOperation() {
             
             // Replace and store in map
             Value newMem = newGpuAlloc.getMemref();
-            replacementMap[memref] = newMem;
+            replacementMap[ultimateMemref] = newMem;
             
             // Replace all uses
             gpuAllocOp.getMemref().replaceAllUsesWith(newMem);
             gpuAllocOp.erase();
             
-            // Update the extract op
-            extractOp.setOperand(newMem);
+            // 如果原始memref经过了reinterpret_cast，使用processOperand处理
+            if (memref != ultimateMemref) {
+              bool needUpdateUsers = false;
+              Value processedMemref = processOperand(builder, extractOp.getLoc(), memref, needUpdateUsers);
+              extractOp.setOperand(processedMemref);
+            } else {
+              extractOp.setOperand(newMem);
+            }
           }
         } else {
           // For memref.alloc, memref.get_global or krnl.global, process at function start
@@ -999,17 +1525,25 @@ void InsertGPUAllocPass::runOnOperation() {
           
           builder.setInsertionPointToStart(&funcOp.getBody().front());
           
-          // Process the operand to create GPU memory
+          // 如果原始memref经过了reinterpret_cast，使用processOperand处理整个链
+          Value processedMemref;
           bool updateUsers = false;
-          Value gpuMem = processOperand(builder, extractOp.getLoc(), memref, updateUsers);
+          
+          if (memref != ultimateMemref) {
+            // 处理包含reinterpret_cast的情况
+            processedMemref = processOperand(builder, extractOp.getLoc(), memref, updateUsers);
+          } else {
+            // 处理直接的情况
+            processedMemref = processOperand(builder, extractOp.getLoc(), ultimateMemref, updateUsers);
+          }
           
           // Replace the operand of the extract operation
-          extractOp.setOperand(gpuMem);
+          extractOp.setOperand(processedMemref);
           
           // Handle memref.alloc replacement if needed
-          if (updateUsers && isa<memref::AllocOp>(defOp)) {
-            defOp->getResult(0).replaceAllUsesWith(gpuMem);
-            defOp->erase();
+          if (updateUsers && isa<memref::AllocOp>(ultimateDefOp)) {
+            ultimateDefOp->getResult(0).replaceAllUsesWith(processedMemref);
+            ultimateDefOp->erase();
           }
         }
       }
