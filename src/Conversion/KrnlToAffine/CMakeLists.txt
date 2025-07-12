@@ -14,6 +14,7 @@ add_onnx_mlir_library(OMKrnlToAffine
   KrnlToAffineHelper.cpp
   RemoveRedundantSCFIf.cpp
   InsertGPUAllocs.cpp
+  KrnlMemcpyToAffinePass.cpp
 
   LINK_LIBS PUBLIC
   OMSpecializedKernelOpInterface
