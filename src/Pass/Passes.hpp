@@ -150,6 +150,7 @@ std::unique_ptr<mlir::Pass> createConvertKrnlToLLVMPass(bool verifyInputTensors,
     bool useLRODATA, bool storeConstantsToFile,
     float constantsToFileSingleThreshold, float constantsToFileTotalThreshold,
     std::string outputNameNoExt, bool enableParallel);
+std::unique_ptr<mlir::Pass> createKrnlMemcpyToAffinePass(); //modified by p
 std::unique_ptr<mlir::Pass> createRemoveRedundantSCFIfPass(); //modified by p
 std::unique_ptr<mlir::Pass> createInsertGPUAllocPass(); //modified by p
 std::unique_ptr<mlir::Pass> createKernelParallelizationPass(); //modified by p
