@@ -25,6 +25,7 @@ add_onnx_mlir_library(OMMlirDialects
   EliminateRedundantStreamSync.cpp
   InsertMainFunctionPass.cpp
   AffineLoopFlattenPass.cpp
+  SNNBatchFusionPass.cpp
 
   DEPENDS
   OMKrnlIncGen

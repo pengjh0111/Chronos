@@ -354,7 +354,7 @@ LogicalResult addPoolManagement(ModuleOp moduleOp) {
     auto workspacePoolSize = builder.create<LLVM::ConstantOp>(
         func.getLoc(), i32Type, builder.getI32IntegerAttr(50));
     auto workspaceSize = builder.create<LLVM::ConstantOp>(
-        func.getLoc(), i32Type, builder.getI32IntegerAttr(128));
+        func.getLoc(), i32Type, builder.getI32IntegerAttr(256));
     LLVM_DEBUG(llvm::dbgs() << "Adding pool initialization calls\n");
     
     // Add mgpuInitStreamPool(35)

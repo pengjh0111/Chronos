@@ -361,9 +361,19 @@ public:
     outputPtr, streamPtr
   };
   
-  rewriter.create<func::CallOp>(
+  // 在创建func.CallOp之前，获取原始的onnx_node_name属性
+  Attribute onnxNodeNameAttr = convOp->getAttr("onnx_node_name");
+
+  auto callOp = rewriter.create<func::CallOp>(
     loc, TypeRange(), funcOp.getName(), ValueRange(args));
   
+  // 如果原始操作有onnx_node_name属性，则传递给新的调用
+  if (onnxNodeNameAttr) {
+    callOp->setAttr("onnx_node_name", onnxNodeNameAttr);
+    LLVM_DEBUG(llvm::dbgs() << "Transferred onnx_node_name: " 
+              << onnxNodeNameAttr << " to cuDNN call\n");
+  }
+
   func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
   
   if (!streamSyncFunc) {
@@ -375,10 +385,10 @@ public:
       loc, "mgpuStreamSynchronize", streamSyncType);
     streamSyncFunc.setPrivate();
   }
-  
+
   rewriter.create<func::CallOp>(
     loc, TypeRange(), streamSyncFunc.getName(), ValueRange{streamPtr});
-  
+
   func::FuncOp streamDestroyFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamDestroy");
   
   if (!streamDestroyFunc) {
@@ -1854,9 +1864,18 @@ private:
       outputPtr, streamPtr
     };
     
-    rewriter.create<func::CallOp>(
+    // 在创建func.CallOp之前，获取原始的onnx_node_name属性
+    Attribute onnxNodeNameAttr = matMulOp->getAttr("onnx_node_name");
+
+    auto callOp = rewriter.create<func::CallOp>(
       loc, TypeRange(), fcFunc.getName(), ValueRange(args));
     
+    // 如果原始操作有onnx_node_name属性，则传递给新的调用
+    if (onnxNodeNameAttr) {
+      callOp->setAttr("onnx_node_name", onnxNodeNameAttr);
+      LLVM_DEBUG(llvm::dbgs() << "Transferred onnx_node_name: " 
+                << onnxNodeNameAttr << " to cuDNN call\n");
+    }
     // 同步和清理流
     synchronizeAndCleanupStream(rewriter, loc, matMulOp, streamPtr);
     
@@ -1956,8 +1975,17 @@ private:
       inputPtrA, inputPtrB, outputPtr, streamPtr
     };
     
-    rewriter.create<func::CallOp>(loc, TypeRange(), batchedFunc.getName(), ValueRange(args));
+    // 在创建func.CallOp之前，获取原始的onnx_node_name属性
+    Attribute onnxNodeNameAttr = matMulOp->getAttr("onnx_node_name");
+
+    auto callOp = rewriter.create<func::CallOp>(loc, TypeRange(), batchedFunc.getName(), ValueRange(args));
     
+    // 如果原始操作有onnx_node_name属性，则传递给新的调用
+    if (onnxNodeNameAttr) {
+      callOp->setAttr("onnx_node_name", onnxNodeNameAttr);
+      LLVM_DEBUG(llvm::dbgs() << "Transferred onnx_node_name: " 
+                << onnxNodeNameAttr << " to cuDNN call\n");
+    }
     // 同步和清理流
     synchronizeAndCleanupStream(rewriter, loc, matMulOp, streamPtr);
     
@@ -2655,9 +2683,18 @@ public:
       outputPtr, streamPtr
     };
     
-    rewriter.create<func::CallOp>(
+    // 在创建func.CallOp之前，获取原始的onnx_node_name属性
+    Attribute onnxNodeNameAttr = gemmOp->getAttr("onnx_node_name");
+
+    auto callOp = rewriter.create<func::CallOp>(
       loc, TypeRange(), fcFunc.getName(), ValueRange(args));
     
+    // 如果原始操作有onnx_node_name属性，则传递给新的调用
+    if (onnxNodeNameAttr) {
+      callOp->setAttr("onnx_node_name", onnxNodeNameAttr);
+      LLVM_DEBUG(llvm::dbgs() << "Transferred onnx_node_name: " 
+                << onnxNodeNameAttr << " to cuDNN call\n");
+    }
     // 同步流
     func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
     
@@ -3221,9 +3258,19 @@ public:
       streamPtr
     };
     
-    rewriter.create<func::CallOp>(
+    // 在创建func.CallOp之前，获取原始的onnx_node_name属性
+    Attribute onnxNodeNameAttr = maxPoolOp->getAttr("onnx_node_name");
+
+    auto callOp = rewriter.create<func::CallOp>(
       loc, TypeRange(), funcOp.getName(), ValueRange(args));
     
+    // 如果原始操作有onnx_node_name属性，则传递给新的调用
+    if (onnxNodeNameAttr) {
+      callOp->setAttr("onnx_node_name", onnxNodeNameAttr);
+      LLVM_DEBUG(llvm::dbgs() << "Transferred onnx_node_name: " 
+                << onnxNodeNameAttr << " to cuDNN call\n");
+    }
+
     // 同步并销毁流
     func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
     
@@ -3947,9 +3994,18 @@ public:
       streamPtr
     };
     
-    rewriter.create<func::CallOp>(
+    // 在创建func.CallOp之前，获取原始的onnx_node_name属性
+    Attribute onnxNodeNameAttr = avgPoolOp->getAttr("onnx_node_name");
+
+    auto callOp = rewriter.create<func::CallOp>(
       loc, TypeRange(), funcOp.getName(), ValueRange(args));
     
+    // 如果原始操作有onnx_node_name属性，则传递给新的调用
+    if (onnxNodeNameAttr) {
+      callOp->setAttr("onnx_node_name", onnxNodeNameAttr);
+      LLVM_DEBUG(llvm::dbgs() << "Transferred onnx_node_name: " 
+                << onnxNodeNameAttr << " to cuDNN call\n");
+    }
     // 同步并销毁流
     func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
     
@@ -4376,9 +4432,18 @@ public:
     args.insert(args.end(), dimensionValues.begin(), dimensionValues.end());
     args.push_back(streamPtr);
     
-    rewriter.create<func::CallOp>(
+    // 在创建func.CallOp之前，获取原始的onnx_node_name属性
+    Attribute onnxNodeNameAttr = transposeOp->getAttr("onnx_node_name");
+
+    auto callOp = rewriter.create<func::CallOp>(
       loc, TypeRange(), funcOp.getName(), ValueRange(args));
     
+    // 如果原始操作有onnx_node_name属性，则传递给新的调用
+    if (onnxNodeNameAttr) {
+      callOp->setAttr("onnx_node_name", onnxNodeNameAttr);
+      LLVM_DEBUG(llvm::dbgs() << "Transferred onnx_node_name: " 
+                << onnxNodeNameAttr << " to cuDNN call\n");
+    }
     // 同步并销毁流
     func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
     if (!streamSyncFunc) {
