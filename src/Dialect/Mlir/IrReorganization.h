@@ -23,6 +23,11 @@
 // void reorganizeGPUModules(ModuleOp moduleOp, DependencyGraph &graph);
 
 // // Helper functions for processing different node types
+// func::FuncOp ensureDescriptorReturnFuncDecl(mlir::ModuleOp moduleOp, mlir::OpBuilder& builder);
+
+// void insertDescriptorReturnCall(mlir::OpBuilder& builder, mlir::Location loc, 
+//                                func::FuncOp descriptorReturnFunc);
+
 // Value processKernelNode(DependencyNode* node, OpBuilder& builder, IRMapping& mapper, 
 //                        Value waitToken, llvm::DenseSet<Operation*>& processedOps);
 
@@ -36,11 +41,17 @@
 // void processCuLibsNodeWithStream(DependencyNode* node, OpBuilder& builder, IRMapping& mapper,
 //                                 llvm::DenseSet<Operation*>& processedOps, Value stream);
 
+// // **新增：Stream pool相关的处理函数**
+// void processCuLibsNodeWithStreamPool(DependencyNode* node, OpBuilder& builder, IRMapping& mapper,
+//                                     llvm::DenseSet<Operation*>& processedOps, Value stream);
+
 // // Helper functions for CuLibs processing
 // void collectDependentOps(Operation* op, llvm::SetVector<Operation*>& requiredOps, 
 //                         const llvm::DenseSet<Operation*>& processedOps);
 
 // bool shouldMoveWithCuLibs(Operation* op);
+
+// void ensureStreamPoolFunctionDeclarations(ModuleOp moduleOp, OpBuilder& builder);
 
 // } // namespace onnx_mlir
 
@@ -66,15 +77,23 @@ using namespace mlir;
 
 namespace onnx_mlir {
 
+void collectDependentOpsForKernel(Operation* op, llvm::SetVector<Operation*>& requiredOps, 
+                                  const llvm::DenseSet<Operation*>& processedOps);
+bool shouldMoveWithKernels(Operation* op);
+
 // Main reorganization functions
 void reorganizeIR(func::FuncOp funcOp, DependencyGraph &graph);
 void reorganizeGPUModules(ModuleOp moduleOp, DependencyGraph &graph);
 
 // Helper functions for processing different node types
 func::FuncOp ensureDescriptorReturnFuncDecl(mlir::ModuleOp moduleOp, mlir::OpBuilder& builder);
+func::FuncOp ensureWorkspaceReturnFuncDecl(mlir::ModuleOp moduleOp, mlir::OpBuilder& builder);
 
 void insertDescriptorReturnCall(mlir::OpBuilder& builder, mlir::Location loc, 
                                func::FuncOp descriptorReturnFunc);
+
+void insertWorkspaceReturnCall(mlir::OpBuilder& builder, mlir::Location loc, 
+                               func::FuncOp workspaceReturnFunc);
 
 Value processKernelNode(DependencyNode* node, OpBuilder& builder, IRMapping& mapper, 
                        Value waitToken, llvm::DenseSet<Operation*>& processedOps);
@@ -89,9 +108,9 @@ void processCuLibsNode(DependencyNode* node, OpBuilder& builder, IRMapping& mapp
 void processCuLibsNodeWithStream(DependencyNode* node, OpBuilder& builder, IRMapping& mapper,
                                 llvm::DenseSet<Operation*>& processedOps, Value stream);
 
-// **新增：Stream pool相关的处理函数**
-void processCuLibsNodeWithStreamPool(DependencyNode* node, OpBuilder& builder, IRMapping& mapper,
-                                    llvm::DenseSet<Operation*>& processedOps, Value stream);
+// NEW: Enhanced CuLibs processing with extended sequence support
+void processCuLibsNodeWithStreamExtended(DependencyNode* node, OpBuilder& builder, IRMapping& mapper,
+                                         llvm::DenseSet<Operation*>& processedOps, Value stream);
 
 // Helper functions for CuLibs processing
 void collectDependentOps(Operation* op, llvm::SetVector<Operation*>& requiredOps, 
@@ -99,6 +118,7 @@ void collectDependentOps(Operation* op, llvm::SetVector<Operation*>& requiredOps
 
 bool shouldMoveWithCuLibs(Operation* op);
 
+// Stream pool related functions (if needed)
 void ensureStreamPoolFunctionDeclarations(ModuleOp moduleOp, OpBuilder& builder);
 
 } // namespace onnx_mlir
