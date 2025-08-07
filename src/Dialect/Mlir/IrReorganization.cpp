@@ -3520,6 +3520,7 @@ void processCuLibsNodeWithStream(DependencyNode* node, OpBuilder& builder, IRMap
 void processCuLibsNodeWithStreamExtended(DependencyNode* node, OpBuilder& builder, IRMapping& mapper,
                                          llvm::DenseSet<Operation*>& processedOps, Value stream) {
   // Separate operations into categories
+  llvm::SmallVector<Operation*, 8> reinterpretCastOps; // memref.reinterpret_cast operations  
   llvm::SmallVector<Operation*, 8> beforeOps; // memcpy, reinterpret_cast, and dependencies before the main call
   llvm::SmallVector<Operation*, 8> afterOps;  // memcpy operations after the main call
   Operation* mainCall = nullptr;
@@ -3542,6 +3543,8 @@ void processCuLibsNodeWithStreamExtended(DependencyNode* node, OpBuilder& builde
       mainCall = culibsOp;
     } else if (isStreamRelatedOp(culibsOp)) {
       streamOps.push_back(culibsOp);
+    } else if (isa<memref::ReinterpretCastOp>(culibsOp)) {
+      reinterpretCastOps.push_back(culibsOp);  // 新增的分类
     } else if (mainCall && culibsOp->isBeforeInBlock(mainCall)) {
       beforeOps.push_back(culibsOp);
     } else if (mainCall && !culibsOp->isBeforeInBlock(mainCall)) {
@@ -3549,6 +3552,20 @@ void processCuLibsNodeWithStreamExtended(DependencyNode* node, OpBuilder& builde
     } else {
       // If we haven't found mainCall yet, assume it's a before operation
       beforeOps.push_back(culibsOp);
+    }
+  }
+
+  // 在处理其他操作之前，先处理 reinterpret_cast 操作
+  for (Operation* reinterpretOp : reinterpretCastOps) {
+    if (!processedOps.count(reinterpretOp)) {
+      Operation* newOp = builder.clone(*reinterpretOp, mapper);
+      
+      // Update mapping
+      for (unsigned i = 0; i < reinterpretOp->getNumResults(); ++i) {
+        mapper.map(reinterpretOp->getResult(i), newOp->getResult(i));
+      }
+      
+      processedOps.insert(reinterpretOp);
     }
   }
   

@@ -158,6 +158,10 @@ bool isMemrefReinterpretCast(Operation* op);
 bool shouldIncludeInKernelSequence(Operation* op);
 llvm::SmallVector<Operation*, 4> findExtendedKernelSequence(Operation* kernelLaunchOp);
 
+void collectReinterpretCastDependencies(const llvm::SmallVector<Operation*, 4> &sequence, 
+                                       llvm::SetVector<Operation*> &reinterpretCasts,
+                                       const llvm::DenseSet<Operation*> &alreadyProcessed);
+
 } // namespace onnx_mlir
 
 #endif // DEPENDENCY_GRAPH_H

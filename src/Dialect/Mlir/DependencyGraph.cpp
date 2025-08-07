@@ -2453,7 +2453,8 @@ void extractCuLibsDependencies(const llvm::SmallVector<Operation*, 4> &culibsOps
 }
 
 // Find extended culibs operation sequence including memcpy and reinterpret_cast
-llvm::SmallVector<Operation*, 4> findExtendedCuLibsSequence(Operation* streamCreateOp) {
+// llvm::SmallVector<Operation*, 4> findExtendedCuLibsSequence(Operation* streamCreateOp) {
+llvm::SmallVector<Operation*, 4> findBasicCuLibsSequence(Operation* streamCreateOp) {
   llvm::SmallVector<Operation*, 4> sequence;
   
   // First, collect operations before stream create that should be included
@@ -2519,6 +2520,37 @@ llvm::SmallVector<Operation*, 4> findExtendedCuLibsSequence(Operation* streamCre
   
   return sequence;
 }
+
+// Enhanced version that collects reinterpret_cast dependencies
+llvm::SmallVector<Operation*, 4> findExtendedCuLibsSequence(Operation* streamCreateOp) {
+  // First, get the basic sequence using the original logic (重命名后的函数)
+  auto sequence = findBasicCuLibsSequence(streamCreateOp);
+  
+  // Get already processed operations (if available from context)
+  llvm::DenseSet<Operation*> emptyProcessed;
+  
+  // Now collect all reinterpret_cast dependencies
+  llvm::SetVector<Operation*> reinterpretCasts;
+  collectReinterpretCastDependencies(sequence, reinterpretCasts, emptyProcessed);
+  
+  // Create the final sequence with reinterpret_cast operations
+  llvm::SmallVector<Operation*, 4> finalSequence;
+  
+  // Sort reinterpret_cast operations by their position in the block to maintain order
+  llvm::SmallVector<Operation*, 8> sortedReinterpretCasts(reinterpretCasts.begin(), reinterpretCasts.end());
+  llvm::sort(sortedReinterpretCasts, [](Operation* a, Operation* b) {
+    return a->isBeforeInBlock(b);
+  });
+  
+  // Add reinterpret_cast operations first (they are dependencies)
+  finalSequence.append(sortedReinterpretCasts.begin(), sortedReinterpretCasts.end());
+  
+  // Then add the original sequence
+  finalSequence.append(sequence.begin(), sequence.end());
+  
+  return finalSequence;
+}
+
 
 // Keep the original function for compatibility
 llvm::SmallVector<Operation*, 4> findCuLibsSequence(Operation* streamCreateOp) {
@@ -2615,6 +2647,46 @@ void dumpDependencyGraph(DependencyGraph &graph) {
   
   llvm::errs() << "===========================\n";
 }
+
+
+// Helper function to recursively collect all reinterpret_cast dependencies
+void collectReinterpretCastDependencies(const llvm::SmallVector<Operation*, 4> &sequence, 
+                                       llvm::SetVector<Operation*> &reinterpretCasts,
+                                       const llvm::DenseSet<Operation*> &alreadyProcessed = {}) {
+  llvm::DenseSet<Operation*> visited;
+  
+  // Helper lambda to recursively trace reinterpret_cast dependencies
+  std::function<void(Value)> traceReinterpretCastDeps = [&](Value val) {
+    if (auto definingOp = val.getDefiningOp()) {
+      // If it's already processed by another node, skip it
+      if (alreadyProcessed.count(definingOp)) {
+        return;
+      }
+      
+      // Avoid infinite recursion
+      if (visited.count(definingOp)) {
+        return;
+      }
+      visited.insert(definingOp);
+      
+      // If this is a reinterpret_cast operation
+      if (auto reinterpretOp = dyn_cast<memref::ReinterpretCastOp>(definingOp)) {
+        reinterpretCasts.insert(reinterpretOp);
+        
+        // Recursively check the source of reinterpret_cast
+        traceReinterpretCastDeps(reinterpretOp.getSource());
+      }
+    }
+  };
+  
+  // Check all operands of all operations in the sequence
+  for (Operation* op : sequence) {
+    for (Value operand : op->getOperands()) {
+      traceReinterpretCastDeps(operand);
+    }
+  }
+}
+
 
 // CONSERVATIVE: Build the dependency graph with minimal changes
 std::unique_ptr<DependencyGraph> buildDependencyGraph(func::FuncOp funcOp) {
