@@ -2043,7 +2043,7 @@ private:
       params.stride_c = params.m * params.n;
       return shapeA[0] == shapeB[0] && shapeA[2] == shapeB[1]; // 检查batch和k维度
     }
-    
+
     return false; // 不支持的模式
   }
   

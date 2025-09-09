@@ -27,6 +27,7 @@ add_onnx_mlir_library(OMMlirDialects
   AffineLoopFlattenPass.cpp
   SNNBatchFusionPass.cpp
   SNNStructureAnnotation.cpp
+  Lower4DMatMul.cpp
 
   DEPENDS
   OMKrnlIncGen
