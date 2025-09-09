@@ -14,26 +14,6 @@ using namespace llvm;
 // TileSizeOptimizer实现
 //===----------------------------------------------------------------------===//
 
-// CompleteTileConfig TileSizeOptimizer::optimizeTileSize(scf::ParallelOp parallelOp) {
-//   // 步骤1: 提取循环信息
-//   std::vector<LoopInfo> loopInfos = extractLoopInfo(parallelOp);
-  
-//   // 步骤2: 分析内存访问模式
-//   std::vector<MemoryAccessInfo> memAccesses = analyzeMemoryAccesses(parallelOp);
-  
-//   // 步骤3: 分析计算操作
-//   std::vector<ComputationInfo> computations = analyzeComputations(parallelOp);
-  
-//   // 步骤4: 使用启发式规则生成候选tile大小
-//   std::vector<std::vector<int64_t>> tileSizeCandidates = generateTileSizeCandidates(loopInfos);
-  
-//   // 步骤5: 使用动态规划查找最优tile配置
-//   CompleteTileConfig optimalConfig = findOptimalTileConfig(
-//       loopInfos, memAccesses, computations, tileSizeCandidates);
-  
-//   return optimalConfig;
-// }
-
 CompleteTileConfig TileSizeOptimizer::optimizeTileSize(scf::ParallelOp parallelOp) {
   // Step 1: Extract loop information
   std::vector<LoopInfo> loopInfos = extractLoopInfo(parallelOp);
@@ -209,176 +189,6 @@ std::vector<ComputationInfo> TileSizeOptimizer::analyzeComputations(scf::Paralle
   return computations;
 }
 
-// std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
-//     const std::vector<LoopInfo> &loopInfos) {
-  
-//   std::vector<std::vector<int64_t>> candidatesPerDim;
-  
-//   for (const auto &loopInfo : loopInfos) {
-//     std::vector<int64_t> candidatesForDim;
-    
-//     // 如果我们有常量边界，使用它们生成候选值
-//     if (loopInfo.hasConstantBounds) {
-//       int64_t loopRange = loopInfo.constantUpperBound - loopInfo.constantLowerBound;
-      
-//       // 添加2的幂次方候选值
-//       for (int64_t size = 4; size <= 1024; size *= 2) {
-//         // 跳过大于循环范围的尺寸
-//         if (size > loopRange) {
-//           break;
-//         }
-//         candidatesForDim.push_back(size);
-//       }
-      
-//       // 添加循环范围的除数
-//       for (int64_t i = 1; i * i <= loopRange; ++i) {
-//         if (loopRange % i == 0) {
-//           if (i >= 4 && i <= 1024) {
-//             candidatesForDim.push_back(i);
-//           }
-          
-//           int64_t j = loopRange / i;
-//           if (j != i && j >= 4 && j <= 1024) {
-//             candidatesForDim.push_back(j);
-//           }
-//         }
-//       }
-      
-//       // 对候选值进行排序
-//       std::sort(candidatesForDim.begin(), candidatesForDim.end());
-      
-//       // 移除重复项
-//       candidatesForDim.erase(
-//           std::unique(candidatesForDim.begin(), candidatesForDim.end()),
-//           candidatesForDim.end());
-//     } else {
-//       // 对于没有常量边界的情况，使用标准的2的幂次方尺寸
-//       candidatesForDim = {8, 16, 32, 64, 128, 256, 512};
-//     }
-    
-//     // 过滤掉无效的tile尺寸
-//     std::vector<int64_t> validCandidates;
-//     for (int64_t size : candidatesForDim) {
-//       // 检查硬件约束
-//       if (size <= hwParams.maxThreadsPerBlock) {
-//         validCandidates.push_back(size);
-//       }
-//     }
-    
-//     // 如果没有有效候选值，添加一个默认值
-//     if (validCandidates.empty()) {
-//       validCandidates.push_back(32);  // 默认使用warp大小
-//     }
-    
-//     candidatesPerDim.push_back(validCandidates);
-//   }
-  
-//   return candidatesPerDim;
-// }
-
-// std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
-//     const std::vector<LoopInfo> &loopInfos) {
-  
-//   std::vector<std::vector<int64_t>> candidatesPerDim;
-  
-//   for (const auto &loopInfo : loopInfos) {
-//     std::vector<int64_t> candidatesForDim;
-    
-//     // 如果我们有常量边界，使用它们生成候选值
-//     if (loopInfo.hasConstantBounds) {
-//       int64_t loopRange = loopInfo.constantUpperBound - loopInfo.constantLowerBound;
-      
-//       // 小维度特殊处理：直接使用维度大小作为首选候选值
-//       if (loopRange <= 16) {
-//         candidatesForDim.push_back(loopRange);
-//       }
-      
-//       // 对于较小维度，考虑更细粒度的候选值
-//       if (loopRange < 32) {
-//         for (int64_t size = 1; size <= loopRange; ++size) {
-//           candidatesForDim.push_back(size);
-//         }
-//       } else {
-//         // 添加更多细粒度值
-//         for (int64_t size = 1; size <= std::min(loopRange, (int64_t)16); ++size) {
-//           candidatesForDim.push_back(size);
-//         }
-//       }
-      
-//       // 添加2的幂次方候选值
-//       for (int64_t size = 2; size <= loopRange && size <= 1024; size *= 2) {
-//         candidatesForDim.push_back(size);
-//       }
-      
-//       // 添加warp相关优化的值
-//       for (int mul = 1; mul <= 32; mul++) {
-//         int64_t size = hwParams.warpSize * mul;
-//         if (size <= loopRange && size <= 1024) {
-//           candidatesForDim.push_back(size);
-//         } else {
-//           break;
-//         }
-//       }
-      
-//       // 添加循环范围的除数（可以整除的值通常是好的tile size）
-//       for (int64_t i = 1; i * i <= loopRange; ++i) {
-//         if (loopRange % i == 0) {
-//           candidatesForDim.push_back(i);
-          
-//           int64_t j = loopRange / i;
-//           if (j != i) {
-//             candidatesForDim.push_back(j);
-//           }
-//         }
-//       }
-      
-//       // 添加一些常见的CNN kernel大小相关的值
-//       std::vector<int64_t> commonCNNSizes = {3, 5, 7, 9, 11};
-//       for (auto size : commonCNNSizes) {
-//         if (size <= loopRange) {
-//           candidatesForDim.push_back(size);
-//         }
-//       }
-      
-//       // 对候选值进行排序
-//       std::sort(candidatesForDim.begin(), candidatesForDim.end());
-      
-//       // 移除重复项
-//       candidatesForDim.erase(
-//           std::unique(candidatesForDim.begin(), candidatesForDim.end()),
-//           candidatesForDim.end());
-          
-//     } else {
-//       // 对于没有常量边界的情况，使用更全面的候选集
-//       candidatesForDim = {1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024};
-//     }
-    
-//     // 过滤掉无效的tile尺寸，确保不超过循环范围和硬件约束
-//     std::vector<int64_t> validCandidates;
-//     for (int64_t size : candidatesForDim) {
-//       if (size <= hwParams.maxThreadsPerBlock && 
-//           (!loopInfo.hasConstantBounds || size <= loopInfo.constantUpperBound - loopInfo.constantLowerBound)) {
-//         validCandidates.push_back(size);
-//       }
-//     }
-    
-//     // 如果没有有效候选值，添加一个默认值
-//     if (validCandidates.empty()) {
-//       // 对于小维度，使用维度大小作为默认值
-//       if (loopInfo.hasConstantBounds && 
-//           loopInfo.constantUpperBound - loopInfo.constantLowerBound < hwParams.warpSize) {
-//         validCandidates.push_back(loopInfo.constantUpperBound - loopInfo.constantLowerBound);
-//       } else {
-//         validCandidates.push_back(std::min(hwParams.warpSize, (int)32));  // 默认使用warp大小
-//       }
-//     }
-    
-//     candidatesPerDim.push_back(validCandidates);
-//   }
-  
-//   return candidatesPerDim;
-// }
-
 TileSizeOptimizer::ComputationalPattern TileSizeOptimizer::detectComputationalPattern(
     scf::ParallelOp parallelOp,
     const std::vector<MemoryAccessInfo> &memAccesses) {
@@ -485,17 +295,447 @@ TileSizeOptimizer::ComputationalPattern TileSizeOptimizer::detectComputationalPa
   return pattern;
 }
 
+// std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
+//     const std::vector<LoopInfo> &loopInfos,
+//     ComputationalPattern pattern) {
+  
+//   std::vector<std::vector<int64_t>> candidatesPerDim;
+  
+//   // Analyze memory access patterns to determine which dimensions are most important
+//   // This would ideally be done by analyzing memAccesses, but for now we'll use
+//   // heuristics based on loop position
+  
+//   // For CUDA/GPU optimization, innermost dimensions should be prioritized for coalescing
+  
+//   for (int dimIdx = 0; dimIdx < loopInfos.size(); ++dimIdx) {
+//     const auto &loopInfo = loopInfos[dimIdx];
+//     bool isInnermostDim = (dimIdx == loopInfos.size() - 1);
+//     bool isOutermostDim = (dimIdx == 0);
+//     std::vector<int64_t> candidatesForDim;
+    
+//     // Basic set to include in all cases - powers of two are generally good
+//     for (int64_t size = 1; size <= 1024; size *= 2) {
+//       candidatesForDim.push_back(size);
+//     }
+    
+//     // Special handling for different dimensions
+//     if (loopInfo.hasConstantBounds) {
+//       int64_t loopRange = loopInfo.constantUpperBound - loopInfo.constantLowerBound;
+      
+//       // If dimension size is small, include it as a candidate
+//       if (loopRange <= 64) {
+//         candidatesForDim.push_back(loopRange);
+//       }
+      
+//       // For small dimensions, consider all divisors
+//       if (loopRange <= 32) {
+//         for (int64_t i = 1; i <= loopRange; ++i) {
+//           if (loopRange % i == 0) {
+//             candidatesForDim.push_back(i);
+//           }
+//         }
+//       }
+      
+//       // For larger dimensions, include key divisors
+//       else {
+//         for (int64_t i = 1; i * i <= loopRange; ++i) {
+//           if (loopRange % i == 0) {
+//             candidatesForDim.push_back(i);
+//             if (i != loopRange / i) {
+//               candidatesForDim.push_back(loopRange / i);
+//             }
+//           }
+//         }
+//       }
+      
+//       // Hardware-specific tile size candidates
+      
+//       // For innermost dimension, prioritize coalescing - multiples of warp size
+//       if (isInnermostDim) {
+//         for (int i = 1; i <= 4; ++i) {
+//           int64_t size = hwParams.warpSize * i;
+//           if (size <= loopRange && size <= hwParams.maxBlockDimX) {
+//             candidatesForDim.push_back(size);
+//           }
+//         }
+        
+//         // For innermost dimension, also try half-warp sizes
+//         candidatesForDim.push_back(hwParams.warpSize / 2);
+        
+//         // Special case: if innermost dimension is small, include values 
+//         // that are near multiples of warp size
+//         if (loopRange < hwParams.warpSize) {
+//           candidatesForDim.push_back(loopRange);
+//         } else if (loopRange < hwParams.warpSize * 2) {
+//           // For sizes between 32-64, try non-standard sizes like 48
+//           candidatesForDim.push_back(48);
+//         }
+//       }
+      
+//       // For middle dimensions, balance between parallelism and data reuse
+//       if (!isInnermostDim && !isOutermostDim) {
+//         // Common values that often work well for middle dimensions
+//         std::vector<int64_t> midDimCandidates = {4, 8, 12, 16, 24, 32};
+//         for (auto size : midDimCandidates) {
+//           if (size <= loopRange) {
+//             candidatesForDim.push_back(size);
+//           }
+//         }
+        
+//         // Special handling for convolutional patterns - add kernel-size related values
+//         std::vector<int64_t> convKernelSizes = {3, 5, 7, 9, 11};
+//         for (auto kernelSize : convKernelSizes) {
+//           if (kernelSize <= loopRange) {
+//             candidatesForDim.push_back(kernelSize);
+//             // Also add kernel size with halo regions for stencil/conv ops
+//             if (kernelSize + 2 <= loopRange) {
+//               candidatesForDim.push_back(kernelSize + 2);
+//             }
+//           }
+//         }
+//       }
+      
+//       // For outermost dimension, prioritize load balancing across blocks
+//       if (isOutermostDim) {
+//         // Try to find values that evenly divide the dimension for load balancing
+//         for (int div = 2; div <= 16; ++div) {
+//           if (loopRange % div == 0) {
+//             int64_t size = loopRange / div;
+//             if (size <= hwParams.maxBlockDimX) {
+//               candidatesForDim.push_back(size);
+//             }
+//           }
+//         }
+        
+//         // For small batch dimensions (often the outermost in ML workloads)
+//         // include typical batch sizes
+//         std::vector<int64_t> batchSizes = {1, 2, 4, 8, 16, 32, 64, 128};
+//         for (auto size : batchSizes) {
+//           if (size <= loopRange && size <= hwParams.maxBlockDimX) {
+//             candidatesForDim.push_back(size);
+//           }
+//         }
+//       }
+      
+//       // For all dimensions, include values close to sqrt of the range
+//       // (often a good starting point for balanced tiling)
+//       int64_t sqrtRange = static_cast<int64_t>(std::sqrt(loopRange));
+//       candidatesForDim.push_back(sqrtRange);
+//       if (sqrtRange > 1) candidatesForDim.push_back(sqrtRange - 1);
+//       if (sqrtRange < loopRange) candidatesForDim.push_back(sqrtRange + 1);
+      
+//       // For dimensions that could be part of matrix multiplication patterns,
+//       // include sizes that are good for matrix multiply (multiples of 8, 16, 32)
+//       std::vector<int64_t> matmulSizes = {8, 16, 32, 64};
+//       for (auto size : matmulSizes) {
+//         if (size <= loopRange) {
+//           candidatesForDim.push_back(size);
+//         }
+//       }
+      
+//       // For very large dimensions, include some larger tile sizes
+//       if (loopRange > 1024) {
+//         std::vector<int64_t> largeSizes = {128, 256, 384, 512, 768, 1024};
+//         for (auto size : largeSizes) {
+//           if (size <= loopRange && size <= hwParams.maxBlockDimX) {
+//             candidatesForDim.push_back(size);
+//           }
+//         }
+//       }
+//     } else {
+//       // For non-constant loop bounds, use a comprehensive set of candidates
+//       candidatesForDim = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 
+//                          256, 384, 512, 768, 1024};
+      
+//       // Special handling for different dimensions position
+//       if (isInnermostDim) {
+//         // For innermost, prioritize multiples of warp size
+//         candidatesForDim.push_back(hwParams.warpSize);
+//         candidatesForDim.push_back(hwParams.warpSize * 2);
+//         candidatesForDim.push_back(hwParams.warpSize * 4);
+//       }
+//     }
+    
+//     // Sort and remove duplicates
+//     std::sort(candidatesForDim.begin(), candidatesForDim.end());
+//     candidatesForDim.erase(
+//         std::unique(candidatesForDim.begin(), candidatesForDim.end()),
+//         candidatesForDim.end());
+    
+//     // Filter candidates based on hardware constraints
+//     std::vector<int64_t> validCandidates;
+//     for (int64_t size : candidatesForDim) {
+//       bool isValid = true;
+      
+//       // Basic constraint: max threads per dimension
+//       if (dimIdx == 0 && size > hwParams.maxBlockDimX) isValid = false;
+//       else if (dimIdx == 1 && size > hwParams.maxBlockDimY) isValid = false;
+//       else if (dimIdx == 2 && size > hwParams.maxBlockDimZ) isValid = false;
+      
+//       // If this is a constant-bound loop, enforce loop range constraint
+//       if (loopInfo.hasConstantBounds && 
+//           size > loopInfo.constantUpperBound - loopInfo.constantLowerBound) {
+//         isValid = false;
+//       }
+      
+//       if (isValid) {
+//         validCandidates.push_back(size);
+//       }
+//     }
+    
+//     // Edge case: if no valid candidates, add basic defaults
+//     if (validCandidates.empty()) {
+//       if (loopInfo.hasConstantBounds) {
+//         int64_t loopRange = loopInfo.constantUpperBound - loopInfo.constantLowerBound;
+//         // Use smallest of: loop range, warp size, or max dimension size
+//         int64_t defaultSize = std::min({loopRange, 
+//                                       static_cast<int64_t>(hwParams.warpSize),
+//                                       isOutermostDim ? 
+//                                         static_cast<int64_t>(hwParams.maxBlockDimX) : 
+//                                         static_cast<int64_t>(hwParams.maxThreadsPerBlock)});
+//         validCandidates.push_back(std::max(static_cast<int64_t>(1), defaultSize));
+//       } else {
+//         validCandidates.push_back(isInnermostDim ? hwParams.warpSize : 16);
+//       }
+//     }
+    
+//     // Validate combined thread counts when building multi-dimensional candidates
+//     // This needs to be done in findOptimalTileConfig since we need to check
+//     // the product across dimensions
+    
+//     candidatesPerDim.push_back(validCandidates);
+    
+//     LLVM_DEBUG(llvm::dbgs() << "Dimension " << dimIdx 
+//               << " candidates (" << validCandidates.size() << "): ");
+//     LLVM_DEBUG(for (auto size : validCandidates) {
+//       llvm::dbgs() << size << " ";
+//     });
+//     LLVM_DEBUG(llvm::dbgs() << "\n");
+//   }
+  
+//   // Pattern-specific adjustments
+//   switch (pattern) {
+//     case ComputationalPattern::MATMUL: {
+//       // For matrix multiplication, optimize for register blocking and shared memory
+//       if (loopInfos.size() >= 3) {
+//         // Common GEMM tile sizes for dimensions M, N
+//         std::vector<int64_t> matmulTileSizes = {16, 32, 64, 128};
+        
+//         // Add these candidates for the first two dimensions (usually M, N)
+//         for (int i = 0; i < std::min(size_t(2), loopInfos.size()); ++i) {
+//           for (auto size : matmulTileSizes) {
+//             if (loopInfos[i].hasConstantBounds) {
+//               int64_t loopRange = loopInfos[i].constantUpperBound - loopInfos[i].constantLowerBound;
+//               if (size <= loopRange && size <= (i == 0 ? hwParams.maxBlockDimX : hwParams.maxBlockDimY)) {
+//                 candidatesPerDim[i].push_back(size);
+//               }
+//             } else {
+//               candidatesPerDim[i].push_back(size);
+//             }
+//           }
+          
+//           // Sort and remove duplicates
+//           std::sort(candidatesPerDim[i].begin(), candidatesPerDim[i].end());
+//           candidatesPerDim[i].erase(
+//               std::unique(candidatesPerDim[i].begin(), candidatesPerDim[i].end()),
+//               candidatesPerDim[i].end());
+//         }
+        
+//         // For K dimension (reduction), use smaller values to control register pressure
+//         if (loopInfos.size() > 2) {
+//           int kDim = 2; // Typically the 3rd dimension in GEMM
+//           std::vector<int64_t> kDimSizes = {4, 8, 16};
+          
+//           if (loopInfos[kDim].hasConstantBounds) {
+//             int64_t loopRange = loopInfos[kDim].constantUpperBound - loopInfos[kDim].constantLowerBound;
+//             for (auto size : kDimSizes) {
+//               if (size <= loopRange) {
+//                 candidatesPerDim[kDim].push_back(size);
+//               }
+//             }
+            
+//             // Sort and remove duplicates
+//             std::sort(candidatesPerDim[kDim].begin(), candidatesPerDim[kDim].end());
+//             candidatesPerDim[kDim].erase(
+//                 std::unique(candidatesPerDim[kDim].begin(), candidatesPerDim[kDim].end()),
+//                 candidatesPerDim[kDim].end());
+//           }
+//         }
+//       }
+//       break;
+//     }
+    
+//     case ComputationalPattern::CONV: {
+//       // For convolutions, optimize spatial dimensions differently
+//       if (loopInfos.size() >= 4) {
+//         // Batch dimension (typically outermost)
+//         // This is often small and best tiled at size 1 or the exact batch size
+//         int batchDim = 0;
+//         if (loopInfos[batchDim].hasConstantBounds) {
+//           int64_t batchSize = loopInfos[batchDim].constantUpperBound - loopInfos[batchDim].constantLowerBound;
+//           if (batchSize <= 32) {
+//             // If batch size is small, consider using exact batch size
+//             candidatesPerDim[batchDim].push_back(batchSize);
+//           }
+//         }
+        
+//         // Channel dimensions
+//         int channelDim = 1;
+//         if (loopInfos[channelDim].hasConstantBounds) {
+//           int64_t channels = loopInfos[channelDim].constantUpperBound - loopInfos[channelDim].constantLowerBound;
+//           // Common channel grouping sizes for channel dimensions
+//           std::vector<int64_t> channelSizes = {1, 3, 4, 8, 16};
+//           for (auto size : channelSizes) {
+//             if (size <= channels) {
+//               candidatesPerDim[channelDim].push_back(size);
+//             }
+//           }
+//         }
+        
+//         // Spatial dimensions (typically innermost 2 dimensions)
+//         for (int i = std::max(2, static_cast<int>(loopInfos.size()) - 2); 
+//              i < loopInfos.size(); ++i) {
+//           if (loopInfos[i].hasConstantBounds) {
+//             int64_t spatialDim = loopInfos[i].constantUpperBound - loopInfos[i].constantLowerBound;
+            
+//             // For spatial dimensions, include values that match common tensor core sizes
+//             std::vector<int64_t> spatialSizes = {4, 8, 16, 32};
+//             for (auto size : spatialSizes) {
+//               if (size <= spatialDim) {
+//                 candidatesPerDim[i].push_back(size);
+//               }
+//             }
+            
+//             // Add sizes based on common kernel dimensions plus padding
+//             std::vector<int64_t> kernelSizes = {3, 5, 7};
+//             for (auto kSize : kernelSizes) {
+//               for (int padding = 0; padding <= 2; padding++) {
+//                 int64_t tileSize = kSize + 2 * padding;
+//                 if (tileSize <= spatialDim) {
+//                   candidatesPerDim[i].push_back(tileSize);
+//                 }
+//               }
+//             }
+//           }
+          
+//           // Sort and remove duplicates
+//           std::sort(candidatesPerDim[i].begin(), candidatesPerDim[i].end());
+//           candidatesPerDim[i].erase(
+//               std::unique(candidatesPerDim[i].begin(), candidatesPerDim[i].end()),
+//               candidatesPerDim[i].end());
+//         }
+//       }
+//       break;
+//     }
+    
+//     case ComputationalPattern::REDUCTION: {
+//       // For reductions, the reduction dimensions should use larger tiles
+//       if (!loopInfos.empty()) {
+//         // Assume last dimension is reduction dimension (common pattern)
+//         int redDim = loopInfos.size() - 1;
+        
+//         if (loopInfos[redDim].hasConstantBounds) {
+//           int64_t redRange = loopInfos[redDim].constantUpperBound - loopInfos[redDim].constantLowerBound;
+          
+//           // For reduction, try larger tiles to reduce synchronization overhead
+//           std::vector<int64_t> redSizes = {32, 64, 128, 256, 512};
+//           for (auto size : redSizes) {
+//             if (size <= redRange) {
+//               candidatesPerDim[redDim].push_back(size);
+//             }
+//           }
+          
+//           // Also try full reduction in one tile
+//           candidatesPerDim[redDim].push_back(redRange);
+//         }
+        
+//         // Sort and remove duplicates
+//         std::sort(candidatesPerDim[redDim].begin(), candidatesPerDim[redDim].end());
+//         candidatesPerDim[redDim].erase(
+//             std::unique(candidatesPerDim[redDim].begin(), candidatesPerDim[redDim].end()),
+//             candidatesPerDim[redDim].end());
+//       }
+//       break;
+//     }
+    
+//     case ComputationalPattern::STENCIL: {
+//       // For stencils, consider halo regions
+//       for (int i = 0; i < loopInfos.size(); ++i) {
+//         if (loopInfos[i].hasConstantBounds) {
+//           // Add tile sizes that account for typical stencil radii (1, 2, 3)
+//           for (int radius = 1; radius <= 3; radius++) {
+//             // For a radius-R stencil, a good tile size is often a multiple of 16 or 32, plus 2*R
+//             for (int base : {16, 32}) {
+//               int64_t tileSize = base + 2 * radius;
+//               if (tileSize <= loopInfos[i].constantUpperBound - loopInfos[i].constantLowerBound) {
+//                 candidatesPerDim[i].push_back(tileSize);
+//               }
+//             }
+//           }
+          
+//           // Sort and remove duplicates
+//           std::sort(candidatesPerDim[i].begin(), candidatesPerDim[i].end());
+//           candidatesPerDim[i].erase(
+//               std::unique(candidatesPerDim[i].begin(), candidatesPerDim[i].end()),
+//               candidatesPerDim[i].end());
+//         }
+//       }
+//       break;
+//     }
+    
+//     case ComputationalPattern::ELEMENTWISE: {
+//       // For element-wise, prioritize coalesced memory access for innermost dim
+//       if (!loopInfos.empty()) {
+//         int innerDim = loopInfos.size() - 1;
+        
+//         // For innermost dimension, focus on warp and multiple-warp sizes
+//         for (int warps = 1; warps <= 8; warps *= 2) {
+//           int64_t size = hwParams.warpSize * warps;
+//           if (loopInfos[innerDim].hasConstantBounds) {
+//             int64_t dimSize = loopInfos[innerDim].constantUpperBound - loopInfos[innerDim].constantLowerBound;
+//             if (size <= dimSize) {
+//               candidatesPerDim[innerDim].push_back(size);
+//             }
+//           } else {
+//             candidatesPerDim[innerDim].push_back(size);
+//           }
+//         }
+        
+//         // Sort and remove duplicates
+//         std::sort(candidatesPerDim[innerDim].begin(), candidatesPerDim[innerDim].end());
+//         candidatesPerDim[innerDim].erase(
+//             std::unique(candidatesPerDim[innerDim].begin(), candidatesPerDim[innerDim].end()),
+//             candidatesPerDim[innerDim].end());
+//       }
+//       break;
+//     }
+    
+//     case ComputationalPattern::GENERIC:
+//     default:
+//       // No additional adjustments for generic pattern
+//       break;
+//   }
+  
+//   return candidatesPerDim;
+// }
+
 std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
     const std::vector<LoopInfo> &loopInfos,
     ComputationalPattern pattern) {
   
   std::vector<std::vector<int64_t>> candidatesPerDim;
   
-  // Analyze memory access patterns to determine which dimensions are most important
-  // This would ideally be done by analyzing memAccesses, but for now we'll use
-  // heuristics based on loop position
-  
-  // For CUDA/GPU optimization, innermost dimensions should be prioritized for coalescing
+  // Helper lambda to check if a tile size can evenly divide the iteration count
+  auto canDivideEvenly = [](const LoopInfo &loopInfo, int64_t tileSize) -> bool {
+    if (!loopInfo.hasConstantBounds) {
+      return true; // Cannot check for non-constant bounds, allow all candidates
+    }
+    
+    int64_t loopRange = loopInfo.constantUpperBound - loopInfo.constantLowerBound;
+    int64_t iterationCount = loopRange / loopInfo.constantStep;
+    
+    return (iterationCount % tileSize == 0);
+  };
   
   for (int dimIdx = 0; dimIdx < loopInfos.size(); ++dimIdx) {
     const auto &loopInfo = loopInfos[dimIdx];
@@ -503,36 +743,39 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
     bool isOutermostDim = (dimIdx == 0);
     std::vector<int64_t> candidatesForDim;
     
-    // Basic set to include in all cases - powers of two are generally good
+    // Basic set - powers of two that can evenly divide
     for (int64_t size = 1; size <= 1024; size *= 2) {
-      candidatesForDim.push_back(size);
+      if (canDivideEvenly(loopInfo, size)) {
+        candidatesForDim.push_back(size);
+      }
     }
     
     // Special handling for different dimensions
     if (loopInfo.hasConstantBounds) {
       int64_t loopRange = loopInfo.constantUpperBound - loopInfo.constantLowerBound;
+      int64_t iterationCount = loopRange / loopInfo.constantStep;
       
-      // If dimension size is small, include it as a candidate
+      // If dimension size is small, include it as a candidate (it always divides itself)
       if (loopRange <= 64) {
-        candidatesForDim.push_back(loopRange);
+        candidatesForDim.push_back(iterationCount);
       }
       
-      // For small dimensions, consider all divisors
-      if (loopRange <= 32) {
-        for (int64_t i = 1; i <= loopRange; ++i) {
-          if (loopRange % i == 0) {
+      // For small dimensions, consider all divisors (these are guaranteed to divide evenly)
+      if (iterationCount <= 32) {
+        for (int64_t i = 1; i <= iterationCount; ++i) {
+          if (iterationCount % i == 0) {
             candidatesForDim.push_back(i);
           }
         }
       }
       
-      // For larger dimensions, include key divisors
+      // For larger dimensions, include key divisors (these are guaranteed to divide evenly)
       else {
-        for (int64_t i = 1; i * i <= loopRange; ++i) {
-          if (loopRange % i == 0) {
+        for (int64_t i = 1; i * i <= iterationCount; ++i) {
+          if (iterationCount % i == 0) {
             candidatesForDim.push_back(i);
-            if (i != loopRange / i) {
-              candidatesForDim.push_back(loopRange / i);
+            if (i != iterationCount / i) {
+              candidatesForDim.push_back(iterationCount / i);
             }
           }
         }
@@ -544,21 +787,26 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
       if (isInnermostDim) {
         for (int i = 1; i <= 4; ++i) {
           int64_t size = hwParams.warpSize * i;
-          if (size <= loopRange && size <= hwParams.maxBlockDimX) {
+          if (size <= loopRange && size <= hwParams.maxBlockDimX && canDivideEvenly(loopInfo, size)) {
             candidatesForDim.push_back(size);
           }
         }
         
         // For innermost dimension, also try half-warp sizes
-        candidatesForDim.push_back(hwParams.warpSize / 2);
+        int64_t halfWarpSize = hwParams.warpSize / 2;
+        if (canDivideEvenly(loopInfo, halfWarpSize)) {
+          candidatesForDim.push_back(halfWarpSize);
+        }
         
         // Special case: if innermost dimension is small, include values 
-        // that are near multiples of warp size
+        // that are near multiples of warp size but still divide evenly
         if (loopRange < hwParams.warpSize) {
-          candidatesForDim.push_back(loopRange);
+          // iterationCount already added above
         } else if (loopRange < hwParams.warpSize * 2) {
-          // For sizes between 32-64, try non-standard sizes like 48
-          candidatesForDim.push_back(48);
+          // For sizes between 32-64, try non-standard sizes like 48 if they divide evenly
+          if (canDivideEvenly(loopInfo, 48)) {
+            candidatesForDim.push_back(48);
+          }
         }
       }
       
@@ -567,7 +815,7 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
         // Common values that often work well for middle dimensions
         std::vector<int64_t> midDimCandidates = {4, 8, 12, 16, 24, 32};
         for (auto size : midDimCandidates) {
-          if (size <= loopRange) {
+          if (size <= loopRange && canDivideEvenly(loopInfo, size)) {
             candidatesForDim.push_back(size);
           }
         }
@@ -575,11 +823,12 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
         // Special handling for convolutional patterns - add kernel-size related values
         std::vector<int64_t> convKernelSizes = {3, 5, 7, 9, 11};
         for (auto kernelSize : convKernelSizes) {
-          if (kernelSize <= loopRange) {
+          if (kernelSize <= loopRange && canDivideEvenly(loopInfo, kernelSize)) {
             candidatesForDim.push_back(kernelSize);
             // Also add kernel size with halo regions for stencil/conv ops
-            if (kernelSize + 2 <= loopRange) {
-              candidatesForDim.push_back(kernelSize + 2);
+            int64_t sizeWithHalo = kernelSize + 2;
+            if (sizeWithHalo <= loopRange && canDivideEvenly(loopInfo, sizeWithHalo)) {
+              candidatesForDim.push_back(sizeWithHalo);
             }
           }
         }
@@ -588,9 +837,10 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
       // For outermost dimension, prioritize load balancing across blocks
       if (isOutermostDim) {
         // Try to find values that evenly divide the dimension for load balancing
+        // (these are guaranteed to divide evenly since we're computing divisors)
         for (int div = 2; div <= 16; ++div) {
-          if (loopRange % div == 0) {
-            int64_t size = loopRange / div;
+          if (iterationCount % div == 0) {
+            int64_t size = iterationCount / div;
             if (size <= hwParams.maxBlockDimX) {
               candidatesForDim.push_back(size);
             }
@@ -598,27 +848,33 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
         }
         
         // For small batch dimensions (often the outermost in ML workloads)
-        // include typical batch sizes
+        // include typical batch sizes that divide evenly
         std::vector<int64_t> batchSizes = {1, 2, 4, 8, 16, 32, 64, 128};
         for (auto size : batchSizes) {
-          if (size <= loopRange && size <= hwParams.maxBlockDimX) {
+          if (size <= loopRange && size <= hwParams.maxBlockDimX && canDivideEvenly(loopInfo, size)) {
             candidatesForDim.push_back(size);
           }
         }
       }
       
-      // For all dimensions, include values close to sqrt of the range
+      // For all dimensions, include values close to sqrt of the iteration count
       // (often a good starting point for balanced tiling)
-      int64_t sqrtRange = static_cast<int64_t>(std::sqrt(loopRange));
-      candidatesForDim.push_back(sqrtRange);
-      if (sqrtRange > 1) candidatesForDim.push_back(sqrtRange - 1);
-      if (sqrtRange < loopRange) candidatesForDim.push_back(sqrtRange + 1);
+      int64_t sqrtIterCount = static_cast<int64_t>(std::sqrt(iterationCount));
+      
+      // Try sqrt and nearby values that divide evenly
+      for (int64_t candidate = std::max(static_cast<int64_t>(1), sqrtIterCount - 2); 
+           candidate <= sqrtIterCount + 2 && candidate <= iterationCount; 
+           ++candidate) {
+        if (canDivideEvenly(loopInfo, candidate)) {
+          candidatesForDim.push_back(candidate);
+        }
+      }
       
       // For dimensions that could be part of matrix multiplication patterns,
       // include sizes that are good for matrix multiply (multiples of 8, 16, 32)
       std::vector<int64_t> matmulSizes = {8, 16, 32, 64};
       for (auto size : matmulSizes) {
-        if (size <= loopRange) {
+        if (size <= loopRange && canDivideEvenly(loopInfo, size)) {
           candidatesForDim.push_back(size);
         }
       }
@@ -627,13 +883,14 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
       if (loopRange > 1024) {
         std::vector<int64_t> largeSizes = {128, 256, 384, 512, 768, 1024};
         for (auto size : largeSizes) {
-          if (size <= loopRange && size <= hwParams.maxBlockDimX) {
+          if (size <= loopRange && size <= hwParams.maxBlockDimX && canDivideEvenly(loopInfo, size)) {
             candidatesForDim.push_back(size);
           }
         }
       }
     } else {
       // For non-constant loop bounds, use a comprehensive set of candidates
+      // Cannot check divisibility, so include all reasonable candidates
       candidatesForDim = {1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 
                          256, 384, 512, 768, 1024};
       
@@ -673,25 +930,26 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
       }
     }
     
-    // Edge case: if no valid candidates, add basic defaults
+    // Edge case: if no valid candidates, add basic defaults that divide evenly
     if (validCandidates.empty()) {
       if (loopInfo.hasConstantBounds) {
         int64_t loopRange = loopInfo.constantUpperBound - loopInfo.constantLowerBound;
-        // Use smallest of: loop range, warp size, or max dimension size
-        int64_t defaultSize = std::min({loopRange, 
-                                      static_cast<int64_t>(hwParams.warpSize),
-                                      isOutermostDim ? 
-                                        static_cast<int64_t>(hwParams.maxBlockDimX) : 
-                                        static_cast<int64_t>(hwParams.maxThreadsPerBlock)});
-        validCandidates.push_back(std::max(static_cast<int64_t>(1), defaultSize));
+        int64_t iterationCount = loopRange / loopInfo.constantStep;
+        
+        // Use 1 as fallback (always divides evenly)
+        validCandidates.push_back(1);
+        
+        // Try to add a reasonable size that divides evenly
+        for (int64_t candidate : {2, 4, 8, 16, 32}) {
+          if (candidate <= iterationCount && canDivideEvenly(loopInfo, candidate)) {
+            validCandidates.push_back(candidate);
+            break;
+          }
+        }
       } else {
         validCandidates.push_back(isInnermostDim ? hwParams.warpSize : 16);
       }
     }
-    
-    // Validate combined thread counts when building multi-dimensional candidates
-    // This needs to be done in findOptimalTileConfig since we need to check
-    // the product across dimensions
     
     candidatesPerDim.push_back(validCandidates);
     
@@ -703,7 +961,7 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
     LLVM_DEBUG(llvm::dbgs() << "\n");
   }
   
-  // Pattern-specific adjustments
+  // Pattern-specific adjustments - also need to check divisibility
   switch (pattern) {
     case ComputationalPattern::MATMUL: {
       // For matrix multiplication, optimize for register blocking and shared memory
@@ -716,7 +974,9 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
           for (auto size : matmulTileSizes) {
             if (loopInfos[i].hasConstantBounds) {
               int64_t loopRange = loopInfos[i].constantUpperBound - loopInfos[i].constantLowerBound;
-              if (size <= loopRange && size <= (i == 0 ? hwParams.maxBlockDimX : hwParams.maxBlockDimY)) {
+              if (size <= loopRange && 
+                  size <= (i == 0 ? hwParams.maxBlockDimX : hwParams.maxBlockDimY) &&
+                  canDivideEvenly(loopInfos[i], size)) {
                 candidatesPerDim[i].push_back(size);
               }
             } else {
@@ -739,7 +999,7 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
           if (loopInfos[kDim].hasConstantBounds) {
             int64_t loopRange = loopInfos[kDim].constantUpperBound - loopInfos[kDim].constantLowerBound;
             for (auto size : kDimSizes) {
-              if (size <= loopRange) {
+              if (size <= loopRange && canDivideEvenly(loopInfos[kDim], size)) {
                 candidatesPerDim[kDim].push_back(size);
               }
             }
@@ -759,24 +1019,25 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
       // For convolutions, optimize spatial dimensions differently
       if (loopInfos.size() >= 4) {
         // Batch dimension (typically outermost)
-        // This is often small and best tiled at size 1 or the exact batch size
         int batchDim = 0;
         if (loopInfos[batchDim].hasConstantBounds) {
-          int64_t batchSize = loopInfos[batchDim].constantUpperBound - loopInfos[batchDim].constantLowerBound;
-          if (batchSize <= 32) {
-            // If batch size is small, consider using exact batch size
-            candidatesPerDim[batchDim].push_back(batchSize);
+          int64_t batchRange = loopInfos[batchDim].constantUpperBound - loopInfos[batchDim].constantLowerBound;
+          int64_t batchIterCount = batchRange / loopInfos[batchDim].constantStep;
+          if (batchIterCount <= 32) {
+            // If batch iteration count is small, consider using exact batch iteration count
+            candidatesPerDim[batchDim].push_back(batchIterCount);
           }
         }
         
         // Channel dimensions
         int channelDim = 1;
         if (loopInfos[channelDim].hasConstantBounds) {
-          int64_t channels = loopInfos[channelDim].constantUpperBound - loopInfos[channelDim].constantLowerBound;
+          int64_t channelRange = loopInfos[channelDim].constantUpperBound - loopInfos[channelDim].constantLowerBound;
+          int64_t channelIterCount = channelRange / loopInfos[channelDim].constantStep;
           // Common channel grouping sizes for channel dimensions
           std::vector<int64_t> channelSizes = {1, 3, 4, 8, 16};
           for (auto size : channelSizes) {
-            if (size <= channels) {
+            if (size <= channelIterCount && canDivideEvenly(loopInfos[channelDim], size)) {
               candidatesPerDim[channelDim].push_back(size);
             }
           }
@@ -786,12 +1047,13 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
         for (int i = std::max(2, static_cast<int>(loopInfos.size()) - 2); 
              i < loopInfos.size(); ++i) {
           if (loopInfos[i].hasConstantBounds) {
-            int64_t spatialDim = loopInfos[i].constantUpperBound - loopInfos[i].constantLowerBound;
+            int64_t spatialRange = loopInfos[i].constantUpperBound - loopInfos[i].constantLowerBound;
+            int64_t spatialIterCount = spatialRange / loopInfos[i].constantStep;
             
             // For spatial dimensions, include values that match common tensor core sizes
             std::vector<int64_t> spatialSizes = {4, 8, 16, 32};
             for (auto size : spatialSizes) {
-              if (size <= spatialDim) {
+              if (size <= spatialIterCount && canDivideEvenly(loopInfos[i], size)) {
                 candidatesPerDim[i].push_back(size);
               }
             }
@@ -801,7 +1063,7 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
             for (auto kSize : kernelSizes) {
               for (int padding = 0; padding <= 2; padding++) {
                 int64_t tileSize = kSize + 2 * padding;
-                if (tileSize <= spatialDim) {
+                if (tileSize <= spatialIterCount && canDivideEvenly(loopInfos[i], tileSize)) {
                   candidatesPerDim[i].push_back(tileSize);
                 }
               }
@@ -826,17 +1088,18 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
         
         if (loopInfos[redDim].hasConstantBounds) {
           int64_t redRange = loopInfos[redDim].constantUpperBound - loopInfos[redDim].constantLowerBound;
+          int64_t redIterCount = redRange / loopInfos[redDim].constantStep;
           
           // For reduction, try larger tiles to reduce synchronization overhead
           std::vector<int64_t> redSizes = {32, 64, 128, 256, 512};
           for (auto size : redSizes) {
-            if (size <= redRange) {
+            if (size <= redIterCount && canDivideEvenly(loopInfos[redDim], size)) {
               candidatesPerDim[redDim].push_back(size);
             }
           }
           
-          // Also try full reduction in one tile
-          candidatesPerDim[redDim].push_back(redRange);
+          // Also try full reduction in one tile (always divides evenly)
+          candidatesPerDim[redDim].push_back(redIterCount);
         }
         
         // Sort and remove duplicates
@@ -852,12 +1115,15 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
       // For stencils, consider halo regions
       for (int i = 0; i < loopInfos.size(); ++i) {
         if (loopInfos[i].hasConstantBounds) {
+          int64_t stencilRange = loopInfos[i].constantUpperBound - loopInfos[i].constantLowerBound;
+          int64_t stencilIterCount = stencilRange / loopInfos[i].constantStep;
+          
           // Add tile sizes that account for typical stencil radii (1, 2, 3)
           for (int radius = 1; radius <= 3; radius++) {
             // For a radius-R stencil, a good tile size is often a multiple of 16 or 32, plus 2*R
             for (int base : {16, 32}) {
               int64_t tileSize = base + 2 * radius;
-              if (tileSize <= loopInfos[i].constantUpperBound - loopInfos[i].constantLowerBound) {
+              if (tileSize <= stencilIterCount && canDivideEvenly(loopInfos[i], tileSize)) {
                 candidatesPerDim[i].push_back(tileSize);
               }
             }
@@ -882,8 +1148,9 @@ std::vector<std::vector<int64_t>> TileSizeOptimizer::generateTileSizeCandidates(
         for (int warps = 1; warps <= 8; warps *= 2) {
           int64_t size = hwParams.warpSize * warps;
           if (loopInfos[innerDim].hasConstantBounds) {
-            int64_t dimSize = loopInfos[innerDim].constantUpperBound - loopInfos[innerDim].constantLowerBound;
-            if (size <= dimSize) {
+            int64_t dimRange = loopInfos[innerDim].constantUpperBound - loopInfos[innerDim].constantLowerBound;
+            int64_t dimIterCount = dimRange / loopInfos[innerDim].constantStep;
+            if (size <= dimIterCount && canDivideEvenly(loopInfos[innerDim], size)) {
               candidatesPerDim[innerDim].push_back(size);
             }
           } else {
@@ -1032,282 +1299,6 @@ CompleteTileConfig TileSizeOptimizer::findOptimalTileConfig(
   
   return optimalConfig;
 }
-
-//===----------------------------------------------------------------------===//
-// 性能评估模型实现
-//===----------------------------------------------------------------------===//
-
-// float TileSizeOptimizer::evaluateConfig(
-//     const CompleteTileConfig &config,
-//     const std::vector<LoopInfo> &loopInfos,
-//     const std::vector<MemoryAccessInfo> &memAccesses,
-//     const std::vector<ComputationInfo> &computations) {
-  
-//   // 计算各个性能因素
-//   float arithmeticIntensityScore = evaluateArithmeticIntensity(computations, memAccesses);
-//   float occupancyScore = evaluateOccupancy(config);
-//   float memoryEfficiencyScore = evaluateMemoryEfficiency(config, loopInfos, memAccesses);
-//   float loadBalancingScore = evaluateLoadBalancing(config, loopInfos);
-  
-//   // 各因素的权重（可基于经验结果调整）
-//   const float w_roofline = 0.4f;
-//   const float w_occupancy = 0.3f;
-//   const float w_memory = 0.2f;
-//   const float w_balance = 0.1f;
-  
-//   // 组合所有因素得到最终评分
-//   float totalScore = (
-//       w_roofline * arithmeticIntensityScore +
-//       w_occupancy * occupancyScore +
-//       w_memory * memoryEfficiencyScore +
-//       w_balance * loadBalancingScore
-//   ) / (w_roofline + w_occupancy + w_memory + w_balance);
-  
-//   return totalScore;
-// }
-
-// float TileSizeOptimizer::evaluateArithmeticIntensity(
-//     const std::vector<ComputationInfo> &computations,
-//     const std::vector<MemoryAccessInfo> &memAccesses) {
-  
-//   // 计算总浮点操作数
-//   int64_t totalFLOPs = 0;
-//   for (const auto &comp : computations) {
-//     if (comp.isFloatingPoint) {
-//       totalFLOPs += comp.opCount;
-//     }
-//   }
-  
-//   // 计算总内存访问字节数
-//   int64_t totalBytesAccessed = 0;
-//   for (const auto &access : memAccesses) {
-//     totalBytesAccessed += access.dataTypeSizeInBytes;
-//   }
-  
-//   // 避免除零
-//   if (totalBytesAccessed == 0) {
-//     return 0.0f;
-//   }
-  
-//   // 计算算术强度（每字节的浮点操作数）
-//   float arithmeticIntensity = static_cast<float>(totalFLOPs) / totalBytesAccessed;
-  
-//   // 应用Roofline模型
-//   float computeBound = hwParams.peakComputePerformance;
-//   float memoryBound = arithmeticIntensity * hwParams.memoryBandwidth;
-  
-//   // 根据Roofline模型可达到的性能
-//   float attainablePerformance = std::min(computeBound, memoryBound);
-  
-//   // 归一化到[0, 1]范围，除以峰值计算性能
-//   float normalizedPerformance = attainablePerformance / hwParams.peakComputePerformance;
-  
-//   return normalizedPerformance;
-// }
-
-// float TileSizeOptimizer::evaluateOccupancy(const CompleteTileConfig &config) {
-//   // 计算总tile大小（所有维度的乘积）
-//   int64_t totalTileSize = 1;
-//   for (const auto &tileConfig : config.perDimConfig) {
-//     totalTileSize *= tileConfig.tileSize;
-//   }
-  
-//   // 检查硬件约束
-//   if (totalTileSize > hwParams.maxThreadsPerBlock) {
-//     return 0.0f;  // 无效配置
-//   }
-  
-//   // 估计每线程寄存器使用量
-//   int registersPerThread = 32;  // 默认估计，可进一步细化
-  
-//   // 估计每块共享内存
-//   int sharedMemoryPerBlock = totalTileSize * sizeof(float);  // 简化估计
-  
-//   // 计算理论占用率
-//   int maxBlocksPerSM_byThreadCount = hwParams.maxThreadsPerSM / totalTileSize;
-//   int maxBlocksPerSM_byRegisters = 
-//       hwParams.maxRegistersPerSM / (registersPerThread * totalTileSize);
-//   int maxBlocksPerSM_bySharedMem = 
-//       (sharedMemoryPerBlock > 0) ? 
-//       hwParams.maxSharedMemoryPerSM / sharedMemoryPerBlock : 
-//       hwParams.maxBlocksPerSM;
-  
-//   int maxBlocksPerSM = std::min({
-//     hwParams.maxBlocksPerSM,
-//     maxBlocksPerSM_byThreadCount,
-//     maxBlocksPerSM_byRegisters,
-//     maxBlocksPerSM_bySharedMem
-//   });
-  
-//   float occupancy = 
-//       static_cast<float>(maxBlocksPerSM * totalTileSize) / hwParams.maxThreadsPerSM;
-  
-//   return occupancy;
-// }
-
-// float TileSizeOptimizer::evaluateMemoryEfficiency(
-//     const CompleteTileConfig &config,
-//     const std::vector<LoopInfo> &loopInfos,
-//     const std::vector<MemoryAccessInfo> &memAccesses) {
-  
-//   // 评估合并内存访问效率（权重：0.7）
-//   float coalescedScore = estimateCoalescedAccess(config, memAccesses);
-  
-//   // 评估缓存利用率（权重：0.3）
-//   float cacheScore = estimateCacheUtilization(config, memAccesses);
-  
-//   // 使用适当权重组合评分
-//   float memoryEfficiency = 0.7f * coalescedScore + 0.3f * cacheScore;
-  
-//   return memoryEfficiency;
-// }
-
-// float TileSizeOptimizer::estimateCoalescedAccess(
-//     const CompleteTileConfig &config,
-//     const std::vector<MemoryAccessInfo> &memAccesses) {
-  
-//   float totalScore = 0.0f;
-//   int totalAccesses = 0;
-  
-//   for (const auto &access : memAccesses) {
-//     totalAccesses++;
-    
-//     // 不可分析模式的默认评分
-//     float accessScore = 0.1f;
-    
-//     switch (access.pattern) {
-//       case MemoryAccessPattern::COALESCED:
-//         // 最内层循环tile大小是32的倍数时，合并访问效率更高
-//         if (!config.perDimConfig.empty() && config.perDimConfig.back().tileSize % 32 == 0) {
-//           accessScore = 1.0f;
-//         } else {
-//           accessScore = 0.8f;
-//         }
-//         break;
-//       case MemoryAccessPattern::SEQUENTIAL:
-//         accessScore = 0.5f;
-//         break;
-//       case MemoryAccessPattern::STRIDED:
-//         // 跨步访问的较低评分，基于估计的步长
-//         accessScore = 0.3f;
-//         break;
-//       case MemoryAccessPattern::RANDOM:
-//         accessScore = 0.1f;
-//         break;
-//     }
-    
-//     totalScore += accessScore;
-//   }
-  
-//   // 避免除零
-//   if (totalAccesses == 0) {
-//     return 0.5f;  // 没有内存访问时的默认中等评分
-//   }
-  
-//   return totalScore / totalAccesses;
-// }
-
-// float TileSizeOptimizer::estimateCacheUtilization(
-//     const CompleteTileConfig &config,
-//     const std::vector<MemoryAccessInfo> &memAccesses) {
-  
-//   // 估计数据重用因子
-//   float dataReuse = 1.0f;  // 默认：每块数据使用一次
-  
-//   // 对于矩阵乘法类型模式，数据重用与tile大小成正比
-//   // 这是一个简化模型，需要针对其他模式进行细化
-//   int64_t totalTileSize = 1;
-//   for (const auto &tileConfig : config.perDimConfig) {
-//     totalTileSize *= tileConfig.tileSize;
-//   }
-  
-//   // 简单模型：数据重用随tile大小增加而增加，直到达到某个点
-//   dataReuse = std::min(5.0f, std::sqrt(static_cast<float>(totalTileSize)) / 10.0f + 1.0f);
-  
-//   // 缓存行通常为128字节
-//   const int cacheLineSize = 128;
-  
-//   // 估计缓存利用率（上限为1.0）
-//   float cacheUtilization = std::min(1.0f, dataReuse / (cacheLineSize / 4.0f));
-  
-//   return cacheUtilization;
-// }
-
-// float TileSizeOptimizer::evaluateLoadBalancing(
-//     const CompleteTileConfig &config,
-//     const std::vector<LoopInfo> &loopInfos) {
-  
-//   float balanceScore = 1.0f;
-  
-//   // 检查每个维度的负载均衡情况
-//   for (size_t i = 0; i < config.perDimConfig.size() && i < loopInfos.size(); ++i) {
-//     const auto &tileConfig = config.perDimConfig[i];
-//     const auto &loopInfo = loopInfos[i];
-    
-//     // 跳过没有常量边界的循环
-//     if (!loopInfo.hasConstantBounds) {
-//       continue;
-//     }
-    
-//     // 计算循环范围和块数
-//     int64_t range = loopInfo.constantUpperBound - loopInfo.constantLowerBound;
-//     int64_t numBlocks = (range + tileConfig.tileSize - 1) / tileConfig.tileSize;
-    
-//     // 检查是否有余数
-//     if (range % tileConfig.tileSize != 0) {
-//       int64_t lastBlockSize = range % tileConfig.tileSize;
-//       float dimensionBalanceScore = static_cast<float>(lastBlockSize) / tileConfig.tileSize;
-      
-//       // 更新总体平衡评分（使用所有维度的最小值）
-//       balanceScore = std::min(balanceScore, dimensionBalanceScore);
-//     }
-//   }
-  
-//   return balanceScore;
-// }
-
-// int TileSizeOptimizer::estimateRegistersPerThread(
-//     const std::vector<ComputationInfo> &computations) {
-  
-//   // 基于操作数量的基本寄存器估计
-//   int baseRegisters = 16;  // 循环开销等的基础寄存器
-//   int opRegisters = 0;
-  
-//   for (const auto &comp : computations) {
-//     // 不同操作需要不同数量的寄存器
-//     if (auto arithOp = dyn_cast<arith::AddFOp>(comp.op)) {
-//       opRegisters += 3 * comp.opCount;  // 源操作数 + 结果
-//     } else if (auto arithOp = dyn_cast<arith::MulFOp>(comp.op)) {
-//       opRegisters += 3 * comp.opCount;
-//     } else {
-//       // 其他操作的默认值
-//       opRegisters += 2 * comp.opCount;
-//     }
-//   }
-  
-//   // 估计总寄存器数，上限为最大允许值
-//   int totalRegisters = baseRegisters + std::min(opRegisters, 100);
-//   return std::min(totalRegisters, hwParams.maxRegistersPerThread);
-// }
-
-// int TileSizeOptimizer::calculateSharedMemoryUsage(
-//     const CompleteTileConfig &config,
-//     const std::vector<MemoryAccessInfo> &memAccesses) {
-  
-//   // 简化估计：基于tile大小和典型数据类型
-//   int bytesPerElement = 4;  // 假设大多数是float类型 (4字节)
-  
-//   // 计算tile的总元素数
-//   int64_t totalElements = 1;
-//   for (const auto &tileConfig : config.perDimConfig) {
-//     totalElements *= tileConfig.tileSize;
-//   }
-  
-//   // 估计共享内存用量（简化模型）
-//   int sharedMemory = bytesPerElement * totalElements;
-  
-//   return sharedMemory;
-// }
 
 float TileSizeOptimizer::evaluateConfig(
     const CompleteTileConfig &config,
