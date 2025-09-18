@@ -413,7 +413,9 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
     // target.addLegalOp<ONNXFlattenOp>(); // modified by p (SqueezeNet needed)
     target.addLegalOp<ONNXMaxPoolSingleOutOp>(); // modified by p
     target.addLegalOp<ONNXAveragePoolOp>(); // modified by p
-    // target.addLegalOp<ONNXGatherOp>(); // modified by p
+    // target.addLegalOp<ONNXGatherOp>(); // modified by p (BERT needs this)
+    target.addLegalOp<ONNXReduceMeanV13Op>(); // modified by p (BERT fusion needs this)
+    target.addLegalOp<ONNXReduceSumV11Op>(); // modified by p (BERT fusion needs this)
   }
 
   // Conversion target for accelerators.

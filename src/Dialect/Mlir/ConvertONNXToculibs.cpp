@@ -4483,6 +4483,221 @@ public:
 };
 
 // Pattern to convert onnx.Gather to separated affine.for loops for better parallelization
+// class GatherOpLowering : public OpRewritePattern<mlir::ONNXGatherOp>, public ONNXToCuLibsPatternBase {
+// public:
+//   using OpRewritePattern<mlir::ONNXGatherOp>::OpRewritePattern;
+
+//   LogicalResult matchAndRewrite(mlir::ONNXGatherOp gatherOp, PatternRewriter &rewriter) const override {
+//     Location loc = gatherOp.getLoc();
+//     LLVM_DEBUG(llvm::dbgs() << "Converting onnx.Gather at " << loc << "\n");
+
+//     // 获取输入
+//     Value input = gatherOp.getData();       // 嵌入矩阵，形状如 [vocab_size, embed_dim]
+//     Value indices = gatherOp.getIndices();  // 索引张量，形状如 [batch_size, seq_len]
+    
+//     // 获取axis属性（默认为0）
+//     int64_t axis = 0;
+//     if (auto axisAttr = gatherOp.getAxisAttr()) {
+//       axis = axisAttr.getValue().getSExtValue();
+//     }
+    
+//     // 当前只支持axis=0的gather操作（词嵌入查找的典型情况）
+//     if (axis != 0) {
+//       return rewriter.notifyMatchFailure(gatherOp, "Only axis=0 gather operations are supported");
+//     }
+
+//     // 获取输入类型
+//     auto inputType = mlir::dyn_cast<RankedTensorType>(input.getType());
+//     auto indicesType = mlir::dyn_cast<RankedTensorType>(indices.getType());
+//     auto outputType = mlir::dyn_cast<RankedTensorType>(gatherOp.getResult().getType());
+    
+//     if (!inputType || !inputType.hasStaticShape() ||
+//         !indicesType || !indicesType.hasStaticShape() ||
+//         !outputType || !outputType.hasStaticShape()) {
+//       return rewriter.notifyMatchFailure(gatherOp, "All tensors must have static shapes");
+//     }
+
+//     // 验证输入形状
+//     auto inputShape = inputType.getShape();
+//     auto indicesShape = indicesType.getShape();
+//     auto outputShape = outputType.getShape();
+    
+//     if (inputShape.size() != 2) {
+//       return rewriter.notifyMatchFailure(gatherOp, "Input must be 2D tensor (typical embedding matrix)");
+//     }
+    
+//     if (indicesShape.size() != 2) {
+//       return rewriter.notifyMatchFailure(gatherOp, "Indices must be 2D tensor (batch_size, seq_len)");
+//     }
+
+//     // 提取维度
+//     int64_t vocab_size = inputShape[0];     // 词汇表大小
+//     int64_t embed_dim = inputShape[1];      // 嵌入维度
+//     int64_t batch_size = indicesShape[0];   // 批大小
+//     int64_t seq_len = indicesShape[1];      // 序列长度
+    
+//     LLVM_DEBUG(llvm::dbgs() << "Gather dimensions: vocab_size=" << vocab_size 
+//                << ", embed_dim=" << embed_dim 
+//                << ", batch_size=" << batch_size 
+//                << ", seq_len=" << seq_len << "\n");
+    
+//     // 验证输出形状是否正确
+//     if (outputShape.size() != 3 || 
+//         outputShape[0] != batch_size || 
+//         outputShape[1] != seq_len || 
+//         outputShape[2] != embed_dim) {
+//       return rewriter.notifyMatchFailure(gatherOp, "Output shape mismatch");
+//     }
+
+//     // 将输入张量转换为memref
+//     auto markForBufferization = [&](Value tensor) -> Value {
+//       auto tensorType = tensor.getType().cast<RankedTensorType>();
+//       auto memrefType = MemRefType::get(
+//         tensorType.getShape(),
+//         tensorType.getElementType());
+//       return rewriter.create<UnrealizedConversionCastOp>(
+//         loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
+//     };
+    
+//     auto inputMemref = markForBufferization(input);     // memref<vocab_size x embed_dim x elementType>
+//     auto indicesMemref = markForBufferization(indices); // memref<batch_size x seq_len x i64>
+    
+//     // 分配输出memref
+//     auto outputMemrefType = MemRefType::get(outputShape, outputType.getElementType());
+//     auto outputMemref = rewriter.create<memref::AllocOp>(loc, outputMemrefType);
+    
+//     // 分配临时索引存储memref
+//     auto indexType = rewriter.getIndexType();
+//     auto indicesBufferType = MemRefType::get({batch_size, seq_len}, indexType);
+//     auto indicesBuffer = rewriter.create<memref::AllocOp>(loc, indicesBufferType);
+    
+//     // 创建常量
+//     auto createIndexConst = [&](int64_t value) -> Value {
+//       return rewriter.create<arith::ConstantOp>(loc, indexType, rewriter.getIndexAttr(value));
+//     };
+    
+//     auto vocabSizeConst = createIndexConst(vocab_size);
+//     auto zeroConst = createIndexConst(0);
+    
+//     LLVM_DEBUG(llvm::dbgs() << "Creating separated affine loops for gather operation\n");
+    
+//     // 第一步：预计算所有索引（与原始逻辑完全一致）
+//     // affine.for %i = 0 to batch_size {
+//     //   affine.for %j = 0 to seq_len {
+//     //     %token_id = affine.load %indicesMemref[%i, %j] : memref<batch_size x seq_len x i64>
+//     //     %idx = arith.index_cast %token_id : i64 to index
+//     //     %adjusted_idx = arith.addi %idx, %vocab_size : index
+//     //     %is_negative = arith.cmpi slt, %idx, %zero : index
+//     //     %final_idx = arith.select %is_negative, %adjusted_idx, %idx : index
+//     //     affine.store %final_idx, %indicesBuffer[%i, %j] : memref<batch_size x seq_len x index>
+//     //   }
+//     // }
+    
+//     auto outerLoop1 = rewriter.create<affine::AffineForOp>(
+//         loc, /*lowerBound=*/0, /*upperBound=*/batch_size, /*step=*/1);
+    
+//     {
+//       OpBuilder::InsertionGuard guard(rewriter);
+//       rewriter.setInsertionPointToStart(outerLoop1.getBody());
+//       Value i = outerLoop1.getInductionVar();
+      
+//       auto innerLoop1 = rewriter.create<affine::AffineForOp>(
+//           loc, /*lowerBound=*/0, /*upperBound=*/seq_len, /*step=*/1);
+      
+//       {
+//         OpBuilder::InsertionGuard guard(rewriter);
+//         rewriter.setInsertionPointToStart(innerLoop1.getBody());
+//         Value j = innerLoop1.getInductionVar();
+        
+//         // 加载原始token ID
+//         auto tokenId = rewriter.create<affine::AffineLoadOp>(
+//             loc, indicesMemref, ValueRange{i, j});
+        
+//         // 转换为index类型
+//         auto idx = rewriter.create<arith::IndexCastOp>(
+//             loc, indexType, tokenId);
+        
+//         // 处理负索引：adjusted_idx = idx + vocab_size
+//         auto adjustedIdx = rewriter.create<arith::AddIOp>(
+//             loc, idx, vocabSizeConst);
+        
+//         // 检查是否为负数
+//         auto isNegative = rewriter.create<arith::CmpIOp>(
+//             loc, arith::CmpIPredicate::slt, idx, zeroConst);
+        
+//         // 选择最终索引
+//         auto finalIdx = rewriter.create<arith::SelectOp>(
+//             loc, isNegative, adjustedIdx, idx);
+        
+//         // 存储计算好的索引
+//         rewriter.create<affine::AffineStoreOp>(
+//             loc, finalIdx, indicesBuffer, ValueRange{i, j});
+//       }
+//     }
+    
+//     // 第二步：使用预计算的索引进行内存复制
+//     // affine.for %i = 0 to batch_size {
+//     //   affine.for %j = 0 to seq_len {
+//     //     affine.for %k = 0 to embed_dim {
+//     //       %idx = affine.load %indicesBuffer[%i, %j] : memref<batch_size x seq_len x index>
+//     //       %value = memref.load %inputMemref[%idx, %k] : memref<vocab_size x embed_dim x elementType>
+//     //       affine.store %value, %outputMemref[%i, %j, %k] : memref<batch_size x seq_len x embed_dim x elementType>
+//     //     }
+//     //   }
+//     // }
+    
+//     auto outerLoop2 = rewriter.create<affine::AffineForOp>(
+//         loc, /*lowerBound=*/0, /*upperBound=*/batch_size, /*step=*/1);
+    
+//     {
+//       OpBuilder::InsertionGuard guard(rewriter);
+//       rewriter.setInsertionPointToStart(outerLoop2.getBody());
+//       Value i = outerLoop2.getInductionVar();
+      
+//       auto innerLoop2 = rewriter.create<affine::AffineForOp>(
+//           loc, /*lowerBound=*/0, /*upperBound=*/seq_len, /*step=*/1);
+      
+//       {
+//         OpBuilder::InsertionGuard guard(rewriter);
+//         rewriter.setInsertionPointToStart(innerLoop2.getBody());
+//         Value j = innerLoop2.getInductionVar();
+        
+//         auto embedLoop = rewriter.create<affine::AffineForOp>(
+//             loc, /*lowerBound=*/0, /*upperBound=*/embed_dim, /*step=*/1);
+        
+//         {
+//           OpBuilder::InsertionGuard guard(rewriter);
+//           rewriter.setInsertionPointToStart(embedLoop.getBody());
+//           Value k = embedLoop.getInductionVar();
+          
+//           // 加载预计算的索引
+//           auto precomputedIdx = rewriter.create<affine::AffineLoadOp>(
+//               loc, indicesBuffer, ValueRange{i, j});
+          
+//           // 从输入矩阵加载值
+//           auto value = rewriter.create<memref::LoadOp>(
+//               loc, inputMemref, ValueRange{precomputedIdx, k});
+          
+//           // 存储到输出
+//           rewriter.create<affine::AffineStoreOp>(
+//               loc, value, outputMemref, ValueRange{i, j, k});
+//         }
+//       }
+//     }
+    
+//     // 将输出memref转换回tensor
+//     auto resultTensor = rewriter.create<UnrealizedConversionCastOp>(
+//         loc, TypeRange{outputType}, ValueRange{outputMemref}).getResult(0);
+    
+//     rewriter.replaceOp(gatherOp, resultTensor);
+    
+//     LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.Gather to separated affine loops\n");
+//     return success();
+//   }
+// };
+
+// Pattern to convert onnx.Gather to separated affine.for loops for better parallelization
+// Modified to use i32 instead of index type for better optimization
 class GatherOpLowering : public OpRewritePattern<mlir::ONNXGatherOp>, public ONNXToCuLibsPatternBase {
 public:
   using OpRewritePattern<mlir::ONNXGatherOp>::OpRewritePattern;
@@ -4566,30 +4781,36 @@ public:
     auto outputMemrefType = MemRefType::get(outputShape, outputType.getElementType());
     auto outputMemref = rewriter.create<memref::AllocOp>(loc, outputMemrefType);
     
-    // 分配临时索引存储memref
-    auto indexType = rewriter.getIndexType();
-    auto indicesBufferType = MemRefType::get({batch_size, seq_len}, indexType);
+    // 使用i32类型替代index类型
+    auto i32Type = rewriter.getI32Type();
+    auto indexType = rewriter.getIndexType();  // 仍需要用于memref索引
+    auto indicesBufferType = MemRefType::get({batch_size, seq_len}, i32Type);
     auto indicesBuffer = rewriter.create<memref::AllocOp>(loc, indicesBufferType);
     
-    // 创建常量
+    // 创建常量（使用i32类型）
+    auto createI32Const = [&](int64_t value) -> Value {
+      return rewriter.create<arith::ConstantOp>(loc, i32Type, 
+                                               rewriter.getI32IntegerAttr(static_cast<int32_t>(value)));
+    };
+    
     auto createIndexConst = [&](int64_t value) -> Value {
       return rewriter.create<arith::ConstantOp>(loc, indexType, rewriter.getIndexAttr(value));
     };
     
-    auto vocabSizeConst = createIndexConst(vocab_size);
-    auto zeroConst = createIndexConst(0);
+    auto vocabSizeI32 = createI32Const(vocab_size);
+    auto zeroI32 = createI32Const(0);
     
-    LLVM_DEBUG(llvm::dbgs() << "Creating separated affine loops for gather operation\n");
+    LLVM_DEBUG(llvm::dbgs() << "Creating separated affine loops for gather operation with i32 indices\n");
     
-    // 第一步：预计算所有索引（与原始逻辑完全一致）
+    // 第一步：预计算所有索引（使用i32进行计算）
     // affine.for %i = 0 to batch_size {
     //   affine.for %j = 0 to seq_len {
     //     %token_id = affine.load %indicesMemref[%i, %j] : memref<batch_size x seq_len x i64>
-    //     %idx = arith.index_cast %token_id : i64 to index
-    //     %adjusted_idx = arith.addi %idx, %vocab_size : index
-    //     %is_negative = arith.cmpi slt, %idx, %zero : index
-    //     %final_idx = arith.select %is_negative, %adjusted_idx, %idx : index
-    //     affine.store %final_idx, %indicesBuffer[%i, %j] : memref<batch_size x seq_len x index>
+    //     %idx = arith.trunci %token_id : i64 to i32  // 从i64转换为i32
+    //     %adjusted_idx = arith.addi %idx, %vocab_size_i32 : i32
+    //     %is_negative = arith.cmpi slt, %idx, %zero_i32 : i32
+    //     %final_idx = arith.select %is_negative, %adjusted_idx, %idx : i32
+    //     affine.store %final_idx, %indicesBuffer[%i, %j] : memref<batch_size x seq_len x i32>
     //   }
     // }
     
@@ -4609,38 +4830,39 @@ public:
         rewriter.setInsertionPointToStart(innerLoop1.getBody());
         Value j = innerLoop1.getInductionVar();
         
-        // 加载原始token ID
+        // 加载原始token ID (i64)
         auto tokenId = rewriter.create<affine::AffineLoadOp>(
             loc, indicesMemref, ValueRange{i, j});
         
-        // 转换为index类型
-        auto idx = rewriter.create<arith::IndexCastOp>(
-            loc, indexType, tokenId);
+        // 从i64截断到i32 (假设索引值在i32范围内)
+        auto idx = rewriter.create<arith::TruncIOp>(
+            loc, i32Type, tokenId);
         
-        // 处理负索引：adjusted_idx = idx + vocab_size
+        // 处理负索引：adjusted_idx = idx + vocab_size (使用i32算术)
         auto adjustedIdx = rewriter.create<arith::AddIOp>(
-            loc, idx, vocabSizeConst);
+            loc, idx, vocabSizeI32);
         
-        // 检查是否为负数
+        // 检查是否为负数 (i32比较)
         auto isNegative = rewriter.create<arith::CmpIOp>(
-            loc, arith::CmpIPredicate::slt, idx, zeroConst);
+            loc, arith::CmpIPredicate::slt, idx, zeroI32);
         
-        // 选择最终索引
+        // 选择最终索引 (i32类型)
         auto finalIdx = rewriter.create<arith::SelectOp>(
             loc, isNegative, adjustedIdx, idx);
         
-        // 存储计算好的索引
+        // 存储计算好的i32索引
         rewriter.create<affine::AffineStoreOp>(
             loc, finalIdx, indicesBuffer, ValueRange{i, j});
       }
     }
     
-    // 第二步：使用预计算的索引进行内存复制
+    // 第二步：使用预计算的i32索引进行内存复制
     // affine.for %i = 0 to batch_size {
     //   affine.for %j = 0 to seq_len {
     //     affine.for %k = 0 to embed_dim {
-    //       %idx = affine.load %indicesBuffer[%i, %j] : memref<batch_size x seq_len x index>
-    //       %value = memref.load %inputMemref[%idx, %k] : memref<vocab_size x embed_dim x elementType>
+    //       %idx_i32 = affine.load %indicesBuffer[%i, %j] : memref<batch_size x seq_len x i32>
+    //       %idx_index = arith.index_cast %idx_i32 : i32 to index  // 仅在访问memref时转换为index
+    //       %value = memref.load %inputMemref[%idx_index, %k] : memref<vocab_size x embed_dim x elementType>
     //       affine.store %value, %outputMemref[%i, %j, %k] : memref<batch_size x seq_len x embed_dim x elementType>
     //     }
     //   }
@@ -4670,9 +4892,13 @@ public:
           rewriter.setInsertionPointToStart(embedLoop.getBody());
           Value k = embedLoop.getInductionVar();
           
-          // 加载预计算的索引
-          auto precomputedIdx = rewriter.create<affine::AffineLoadOp>(
+          // 加载预计算的i32索引
+          auto precomputedIdxI32 = rewriter.create<affine::AffineLoadOp>(
               loc, indicesBuffer, ValueRange{i, j});
+          
+          // 仅在访问memref时转换为index类型
+          auto precomputedIdx = rewriter.create<arith::IndexCastOp>(
+              loc, indexType, precomputedIdxI32);
           
           // 从输入矩阵加载值
           auto value = rewriter.create<memref::LoadOp>(
@@ -4691,7 +4917,511 @@ public:
     
     rewriter.replaceOp(gatherOp, resultTensor);
     
-    LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.Gather to separated affine loops\n");
+    LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.Gather to separated affine loops with i32 indices\n");
+    return success();
+  }
+};
+
+// Pattern to convert onnx.ReduceMeanV13 to a call to mgpuCudnnReduceMean
+class ReduceMeanOpLowering : public OpRewritePattern<mlir::ONNXReduceMeanV13Op>, public ONNXToCuLibsPatternBase {
+public:
+  using OpRewritePattern<mlir::ONNXReduceMeanV13Op>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(mlir::ONNXReduceMeanV13Op reduceMeanOp, PatternRewriter &rewriter) const override {
+    // Get the location for error reporting
+    Location loc = reduceMeanOp.getLoc();
+    LLVM_DEBUG(llvm::dbgs() << "Converting onnx.ReduceMeanV13 at " << loc << "\n");
+
+    // Get the input tensor
+    Value input = reduceMeanOp.getData();
+    
+    // Get the input type
+    auto inputType = mlir::dyn_cast<RankedTensorType>(input.getType());
+    if (!inputType || !inputType.hasStaticShape()) {
+      return rewriter.notifyMatchFailure(reduceMeanOp, "Input must have static shape");
+    }
+    
+    // Get element type and determine function suffix
+    Type elementType = inputType.getElementType();
+    std::string functionSuffix = getFunctionSuffix(elementType);
+    std::string functionName = "mgpuCudnnReduceMean" + functionSuffix;
+    
+    LLVM_DEBUG(llvm::dbgs() << "Using function: " << functionName << " for element type: " << elementType << "\n");
+    
+    // Extract input dimensions
+    auto inputShape = inputType.getShape();
+    if (inputShape.size() > 4 || inputShape.size() < 1) {
+      return rewriter.notifyMatchFailure(reduceMeanOp, "Input must be 1D to 4D tensor");
+    }
+    
+    // Pad input shape to 4D for cuDNN compatibility
+    std::vector<int64_t> paddedInputShape(4, 1);
+    int offset = 4 - inputShape.size();
+    for (size_t i = 0; i < inputShape.size(); ++i) {
+      paddedInputShape[i + offset] = inputShape[i];
+    }
+    
+    // Extract axes attribute
+    auto axesAttr = reduceMeanOp.getAxes();
+    if (!axesAttr) {
+      return rewriter.notifyMatchFailure(reduceMeanOp, "axes attribute is required");
+    }
+    
+    std::vector<int64_t> axes;
+    for (auto attr : axesAttr.value()) {
+      int64_t axis = attr.cast<IntegerAttr>().getInt();
+      // Handle negative axes
+      if (axis < 0) {
+        axis = inputShape.size() + axis;
+      }
+      axes.push_back(axis);
+    }
+    
+    // Check keepdims attribute (default is 1 for ReduceMeanV13)
+    int64_t keepdims = reduceMeanOp.getKeepdims();
+    
+    LLVM_DEBUG(llvm::dbgs() << "ReduceMean params: keepdims=" << keepdims << "\n");
+    
+    // Get output type and shape
+    auto outputType = mlir::dyn_cast<RankedTensorType>(reduceMeanOp.getResult().getType());
+    auto outputShape = outputType.getShape();
+    
+    // Pad output shape to 4D
+    std::vector<int64_t> paddedOutputShape(4, 1);
+    offset = 4 - outputShape.size();
+    for (size_t i = 0; i < outputShape.size(); ++i) {
+      paddedOutputShape[i + offset] = outputShape[i];
+    }
+    
+    // Create constants for integer parameters
+    auto i32Type = rewriter.getI32Type();
+    auto createI32Const = [&](int64_t value) -> Value {
+      return rewriter.create<arith::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(value));
+    };
+    
+    // Input dimensions (N, C, H, W)
+    auto nValue = createI32Const(paddedInputShape[0]);
+    auto cValue = createI32Const(paddedInputShape[1]);
+    auto hValue = createI32Const(paddedInputShape[2]);
+    auto wValue = createI32Const(paddedInputShape[3]);
+    
+    // Output dimensions
+    auto outNValue = createI32Const(paddedOutputShape[0]);
+    auto outCValue = createI32Const(paddedOutputShape[1]);
+    auto outHValue = createI32Const(paddedOutputShape[2]);
+    auto outWValue = createI32Const(paddedOutputShape[3]);
+    
+    // Convert axes to 4D space and create axis flags
+    std::vector<int> axisFlags(4, 0); // 0 means no reduction, 1 means reduce
+    for (int64_t axis : axes) {
+      // Convert to 4D axis
+      int axis4d = axis + offset;
+      if (axis4d >= 0 && axis4d < 4) {
+        axisFlags[axis4d] = 1;
+      }
+    }
+    
+    auto reduceNValue = createI32Const(axisFlags[0]);
+    auto reduceCValue = createI32Const(axisFlags[1]);
+    auto reduceHValue = createI32Const(axisFlags[2]);
+    auto reduceWValue = createI32Const(axisFlags[3]);
+    
+    // Mark for bufferization
+    auto markForBufferization = [&](Value tensor) -> Value {
+      auto tensorType = tensor.getType().cast<RankedTensorType>();
+      auto memrefType = MemRefType::get(
+        tensorType.getShape(),
+        tensorType.getElementType());
+      return rewriter.create<UnrealizedConversionCastOp>(
+        loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
+    };
+    
+    auto inputMemref = markForBufferization(input);
+    
+    // Convert memrefs to void pointers
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    
+    auto getPtr = [&](Value memref) -> Value {
+      auto indexType = rewriter.getIndexType();
+      auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(loc, indexType, memref);
+      
+      auto i64Type = rewriter.getIntegerType(64);
+      auto ptrI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, ptrIndex);
+      
+      return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrI64);
+    };
+    
+    auto inputPtr = getPtr(inputMemref);
+    
+    // Allocate output memref
+    auto outputMemrefType = MemRefType::get(outputType.getShape(), outputType.getElementType());
+    auto outputMemref = rewriter.create<memref::AllocOp>(loc, outputMemrefType);
+    auto outputPtr = getPtr(outputMemref);
+    
+    // Create CUDA stream
+    auto moduleOp = reduceMeanOp->getParentOfType<ModuleOp>();
+
+    func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
+    
+    if (!streamCreateFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
+      
+      auto streamCreateType = rewriter.getFunctionType({}, {ptrType});
+      streamCreateFunc = rewriter.create<func::FuncOp>(
+        loc, "mgpuStreamCreate", streamCreateType);
+      streamCreateFunc.setPrivate();
+    }
+    
+    func::FuncOp handleCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCreateHandlesForStream");
+
+    if (!handleCreateFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
+      
+      auto handleCreateType = rewriter.getFunctionType({ptrType}, {});
+      handleCreateFunc = rewriter.create<func::FuncOp>(
+        loc, "mgpuCreateHandlesForStream", handleCreateType);
+      handleCreateFunc.setPrivate();
+    }
+
+    auto streamCallOp = rewriter.create<func::CallOp>(
+      loc, TypeRange{ptrType}, streamCreateFunc.getName(), ValueRange{});
+    auto streamPtr = streamCallOp.getResult(0);
+
+    rewriter.create<func::CallOp>(
+      loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
+    
+    // Find or create the reduce mean function
+    func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>(functionName);
+    
+    if (!funcOp) {
+      LLVM_DEBUG(llvm::dbgs() << "Creating " << functionName << " declaration\n");
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
+      
+      auto funcType = rewriter.getFunctionType({
+        i32Type, i32Type, i32Type, i32Type,  // input n, c, h, w
+        i32Type, i32Type, i32Type, i32Type,  // output n, c, h, w  
+        i32Type, i32Type, i32Type, i32Type,  // reduce flags n, c, h, w
+        ptrType, ptrType,                    // input_data, output_data
+        ptrType                              // stream
+      }, {});
+      
+      funcOp = rewriter.create<func::FuncOp>(
+        loc, functionName, funcType);
+      funcOp.setPrivate();
+    }
+    
+    std::vector<Value> args = {
+      nValue, cValue, hValue, wValue,           // input dimensions
+      outNValue, outCValue, outHValue, outWValue, // output dimensions
+      reduceNValue, reduceCValue, reduceHValue, reduceWValue, // reduce flags
+      inputPtr, outputPtr, streamPtr
+    };
+    
+    // Transfer onnx_node_name attribute if present
+    Attribute onnxNodeNameAttr = reduceMeanOp->getAttr("onnx_node_name");
+
+    auto callOp = rewriter.create<func::CallOp>(
+      loc, TypeRange(), funcOp.getName(), ValueRange(args));
+    
+    if (onnxNodeNameAttr) {
+      callOp->setAttr("onnx_node_name", onnxNodeNameAttr);
+      LLVM_DEBUG(llvm::dbgs() << "Transferred onnx_node_name: " 
+                << onnxNodeNameAttr << " to cuDNN reduce mean call\n");
+    }
+
+    // Synchronize and destroy stream
+    func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
+    
+    if (!streamSyncFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
+      
+      auto streamSyncType = rewriter.getFunctionType({ptrType}, {});
+      streamSyncFunc = rewriter.create<func::FuncOp>(
+        loc, "mgpuStreamSynchronize", streamSyncType);
+      streamSyncFunc.setPrivate();
+    }
+
+    rewriter.create<func::CallOp>(
+      loc, TypeRange(), streamSyncFunc.getName(), ValueRange{streamPtr});
+
+    func::FuncOp streamDestroyFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamDestroy");
+    
+    if (!streamDestroyFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
+      
+      auto streamDestroyType = rewriter.getFunctionType({ptrType}, {});
+      streamDestroyFunc = rewriter.create<func::FuncOp>(
+        loc, "mgpuStreamDestroy", streamDestroyType);
+      streamDestroyFunc.setPrivate();
+    }
+    
+    rewriter.create<func::CallOp>(
+      loc, TypeRange(), streamDestroyFunc.getName(), ValueRange{streamPtr});
+    
+    // Convert memref back to tensor
+    auto resultTensor = rewriter.create<UnrealizedConversionCastOp>(
+        loc, TypeRange{outputType}, ValueRange{outputMemref}).getResult(0);
+    
+    rewriter.replaceOp(reduceMeanOp, resultTensor);
+    
+    LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.ReduceMeanV13 to cuDNN call\n");
+    return success();
+  }
+};
+
+// Pattern to convert onnx.ReduceSumV11 to a call to mgpuCudnnReduceSum
+class ReduceSumOpLowering : public OpRewritePattern<mlir::ONNXReduceSumV11Op>, public ONNXToCuLibsPatternBase {
+public:
+  using OpRewritePattern<mlir::ONNXReduceSumV11Op>::OpRewritePattern;
+
+  LogicalResult matchAndRewrite(mlir::ONNXReduceSumV11Op reduceSumOp, PatternRewriter &rewriter) const override {
+    // Get the location for error reporting
+    Location loc = reduceSumOp.getLoc();
+    LLVM_DEBUG(llvm::dbgs() << "Converting onnx.ReduceSumV11 at " << loc << "\n");
+
+    // Get the input tensor
+    Value input = reduceSumOp.getData();
+    
+    // Get the input type
+    auto inputType = mlir::dyn_cast<RankedTensorType>(input.getType());
+    if (!inputType || !inputType.hasStaticShape()) {
+      return rewriter.notifyMatchFailure(reduceSumOp, "Input must have static shape");
+    }
+    
+    // Get element type and determine function suffix
+    Type elementType = inputType.getElementType();
+    std::string functionSuffix = getFunctionSuffix(elementType);
+    std::string functionName = "mgpuCudnnReduceSum" + functionSuffix;
+    
+    LLVM_DEBUG(llvm::dbgs() << "Using function: " << functionName << " for element type: " << elementType << "\n");
+    
+    // Extract input dimensions
+    auto inputShape = inputType.getShape();
+    if (inputShape.size() > 4 || inputShape.size() < 1) {
+      return rewriter.notifyMatchFailure(reduceSumOp, "Input must be 1D to 4D tensor");
+    }
+    
+    // Pad input shape to 4D for cuDNN compatibility
+    std::vector<int64_t> paddedInputShape(4, 1);
+    int offset = 4 - inputShape.size();
+    for (size_t i = 0; i < inputShape.size(); ++i) {
+      paddedInputShape[i + offset] = inputShape[i];
+    }
+    
+    // Extract axes attribute
+    auto axesAttr = reduceSumOp.getAxes();
+    if (!axesAttr) {
+      return rewriter.notifyMatchFailure(reduceSumOp, "axes attribute is required");
+    }
+    
+    std::vector<int64_t> axes;
+    for (auto attr : axesAttr.value()) {
+      int64_t axis = attr.cast<IntegerAttr>().getInt();
+      // Handle negative axes
+      if (axis < 0) {
+        axis = inputShape.size() + axis;
+      }
+      axes.push_back(axis);
+    }
+    
+    // Check keepdims attribute (default is 1 for ReduceSumV11)
+    int64_t keepdims = reduceSumOp.getKeepdims();
+    
+    LLVM_DEBUG(llvm::dbgs() << "ReduceSum params: keepdims=" << keepdims << "\n");
+    
+    // Get output type and shape
+    auto outputType = mlir::dyn_cast<RankedTensorType>(reduceSumOp.getResult().getType());
+    auto outputShape = outputType.getShape();
+    
+    // Pad output shape to 4D
+    std::vector<int64_t> paddedOutputShape(4, 1);
+    offset = 4 - outputShape.size();
+    for (size_t i = 0; i < outputShape.size(); ++i) {
+      paddedOutputShape[i + offset] = outputShape[i];
+    }
+    
+    // Create constants for integer parameters
+    auto i32Type = rewriter.getI32Type();
+    auto createI32Const = [&](int64_t value) -> Value {
+      return rewriter.create<arith::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(value));
+    };
+    
+    // Input dimensions (N, C, H, W)
+    auto nValue = createI32Const(paddedInputShape[0]);
+    auto cValue = createI32Const(paddedInputShape[1]);
+    auto hValue = createI32Const(paddedInputShape[2]);
+    auto wValue = createI32Const(paddedInputShape[3]);
+    
+    // Output dimensions
+    auto outNValue = createI32Const(paddedOutputShape[0]);
+    auto outCValue = createI32Const(paddedOutputShape[1]);
+    auto outHValue = createI32Const(paddedOutputShape[2]);
+    auto outWValue = createI32Const(paddedOutputShape[3]);
+    
+    // Convert axes to 4D space and create axis flags
+    std::vector<int> axisFlags(4, 0); // 0 means no reduction, 1 means reduce
+    for (int64_t axis : axes) {
+      // Convert to 4D axis
+      int axis4d = axis + offset;
+      if (axis4d >= 0 && axis4d < 4) {
+        axisFlags[axis4d] = 1;
+      }
+    }
+    
+    auto reduceNValue = createI32Const(axisFlags[0]);
+    auto reduceCValue = createI32Const(axisFlags[1]);
+    auto reduceHValue = createI32Const(axisFlags[2]);
+    auto reduceWValue = createI32Const(axisFlags[3]);
+    
+    // Mark for bufferization
+    auto markForBufferization = [&](Value tensor) -> Value {
+      auto tensorType = tensor.getType().cast<RankedTensorType>();
+      auto memrefType = MemRefType::get(
+        tensorType.getShape(),
+        tensorType.getElementType());
+      return rewriter.create<UnrealizedConversionCastOp>(
+        loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
+    };
+    
+    auto inputMemref = markForBufferization(input);
+    
+    // Convert memrefs to void pointers
+    auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+    
+    auto getPtr = [&](Value memref) -> Value {
+      auto indexType = rewriter.getIndexType();
+      auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(loc, indexType, memref);
+      
+      auto i64Type = rewriter.getIntegerType(64);
+      auto ptrI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, ptrIndex);
+      
+      return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrI64);
+    };
+    
+    auto inputPtr = getPtr(inputMemref);
+    
+    // Allocate output memref
+    auto outputMemrefType = MemRefType::get(outputType.getShape(), outputType.getElementType());
+    auto outputMemref = rewriter.create<memref::AllocOp>(loc, outputMemrefType);
+    auto outputPtr = getPtr(outputMemref);
+    
+    // Create CUDA stream
+    auto moduleOp = reduceSumOp->getParentOfType<ModuleOp>();
+
+    func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
+    
+    if (!streamCreateFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
+      
+      auto streamCreateType = rewriter.getFunctionType({}, {ptrType});
+      streamCreateFunc = rewriter.create<func::FuncOp>(
+        loc, "mgpuStreamCreate", streamCreateType);
+      streamCreateFunc.setPrivate();
+    }
+    
+    func::FuncOp handleCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCreateHandlesForStream");
+
+    if (!handleCreateFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
+      
+      auto handleCreateType = rewriter.getFunctionType({ptrType}, {});
+      handleCreateFunc = rewriter.create<func::FuncOp>(
+        loc, "mgpuCreateHandlesForStream", handleCreateType);
+      handleCreateFunc.setPrivate();
+    }
+
+    auto streamCallOp = rewriter.create<func::CallOp>(
+      loc, TypeRange{ptrType}, streamCreateFunc.getName(), ValueRange{});
+    auto streamPtr = streamCallOp.getResult(0);
+
+    rewriter.create<func::CallOp>(
+      loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
+    
+    // Find or create the reduce sum function
+    func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>(functionName);
+    
+    if (!funcOp) {
+      LLVM_DEBUG(llvm::dbgs() << "Creating " << functionName << " declaration\n");
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
+      
+      auto funcType = rewriter.getFunctionType({
+        i32Type, i32Type, i32Type, i32Type,  // input n, c, h, w
+        i32Type, i32Type, i32Type, i32Type,  // output n, c, h, w  
+        i32Type, i32Type, i32Type, i32Type,  // reduce flags n, c, h, w
+        ptrType, ptrType,                    // input_data, output_data
+        ptrType                              // stream
+      }, {});
+      
+      funcOp = rewriter.create<func::FuncOp>(
+        loc, functionName, funcType);
+      funcOp.setPrivate();
+    }
+    
+    std::vector<Value> args = {
+      nValue, cValue, hValue, wValue,           // input dimensions
+      outNValue, outCValue, outHValue, outWValue, // output dimensions
+      reduceNValue, reduceCValue, reduceHValue, reduceWValue, // reduce flags
+      inputPtr, outputPtr, streamPtr
+    };
+    
+    // Transfer onnx_node_name attribute if present
+    Attribute onnxNodeNameAttr = reduceSumOp->getAttr("onnx_node_name");
+
+    auto callOp = rewriter.create<func::CallOp>(
+      loc, TypeRange(), funcOp.getName(), ValueRange(args));
+    
+    if (onnxNodeNameAttr) {
+      callOp->setAttr("onnx_node_name", onnxNodeNameAttr);
+      LLVM_DEBUG(llvm::dbgs() << "Transferred onnx_node_name: " 
+                << onnxNodeNameAttr << " to cuDNN reduce sum call\n");
+    }
+
+    // Synchronize and destroy stream
+    func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
+    
+    if (!streamSyncFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
+      
+      auto streamSyncType = rewriter.getFunctionType({ptrType}, {});
+      streamSyncFunc = rewriter.create<func::FuncOp>(
+        loc, "mgpuStreamSynchronize", streamSyncType);
+      streamSyncFunc.setPrivate();
+    }
+
+    rewriter.create<func::CallOp>(
+      loc, TypeRange(), streamSyncFunc.getName(), ValueRange{streamPtr});
+
+    func::FuncOp streamDestroyFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamDestroy");
+    
+    if (!streamDestroyFunc) {
+      OpBuilder::InsertionGuard guard(rewriter);
+      rewriter.setInsertionPointToStart(moduleOp.getBody());
+      
+      auto streamDestroyType = rewriter.getFunctionType({ptrType}, {});
+      streamDestroyFunc = rewriter.create<func::FuncOp>(
+        loc, "mgpuStreamDestroy", streamDestroyType);
+      streamDestroyFunc.setPrivate();
+    }
+    
+    rewriter.create<func::CallOp>(
+      loc, TypeRange(), streamDestroyFunc.getName(), ValueRange{streamPtr});
+    
+    // Convert memref back to tensor
+    auto resultTensor = rewriter.create<UnrealizedConversionCastOp>(
+        loc, TypeRange{outputType}, ValueRange{outputMemref}).getResult(0);
+    
+    rewriter.replaceOp(reduceSumOp, resultTensor);
+    
+    LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.ReduceSumV11 to cuDNN call\n");
     return success();
   }
 };
@@ -4734,6 +5464,8 @@ struct ONNXToCuDNNPass
     patterns.add<AveragePoolOpLowering>(context);
     patterns.add<TransposeOpLowering>(context);
     patterns.add<GatherOpLowering>(context);
+    patterns.add<ReduceMeanOpLowering>(context);
+    patterns.add<ReduceSumOpLowering>(context);
     
 
     // Apply patterns
@@ -4754,6 +5486,8 @@ struct ONNXToCuDNNPass
     target.addIllegalOp<mlir::ONNXAveragePoolOp>();
     target.addIllegalOp<mlir::ONNXTransposeOp>();
     target.addIllegalOp<mlir::ONNXGatherOp>();
+    target.addIllegalOp<mlir::ONNXReduceMeanV13Op>();
+    target.addIllegalOp<mlir::ONNXReduceSumV11Op>();
     
     if (failed(applyPartialConversion(moduleOp, target, std::move(patterns)))) {
       signalPassFailure();
