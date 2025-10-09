@@ -2440,6 +2440,28 @@ void extractCuLibsDependencies(const llvm::SmallVector<Operation*, 4> &culibsOps
       outputs.insert(memrefOperands[2]); // output
     }
   }
+  else if (funcName.contains("ReduceSum") || funcName.contains("ReduceMean")) {
+    // mgpuCudnnReduceSum/ReduceMean: input_data -> output_data
+    if (memrefOperands.size() >= 2) {
+      inputs.insert(memrefOperands[0]);  // input_data
+      outputs.insert(memrefOperands[1]); // output_data
+    }
+  }
+  else if (funcName.contains("Transpose_0213") || funcName.contains("Transpose_0231")) {
+    // mgpuCulibsTranspose_*: input_data -> output_data
+    if (memrefOperands.size() >= 2) {
+      inputs.insert(memrefOperands[0]);  // input_data
+      outputs.insert(memrefOperands[1]); // output_data
+    }
+  }
+  else if (funcName.contains("BatchedMatMulForward")) {
+    // mgpuCulibsBatchedMatMulForward: input_a, input_b -> output_c
+    if (memrefOperands.size() >= 3) {
+      inputs.insert(memrefOperands[0]);  // input_a
+      inputs.insert(memrefOperands[1]);  // input_b
+      outputs.insert(memrefOperands[2]); // output_c
+    }
+  }
   else {
     // Conservative analysis for unknown functions
     for (unsigned i = 0; i < memrefOperands.size(); ++i) {

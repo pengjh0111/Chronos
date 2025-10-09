@@ -22,6 +22,7 @@
 #include "src/Compiler/OptionUtils.hpp"
 #include "src/Conversion/ONNXToKrnl/ONNXToKrnlCommon.hpp"
 #include "src/Dialect/Mlir/VectorMachineSupport.hpp"
+#include <regex>
 
 using namespace mlir;
 
@@ -398,11 +399,13 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
     // being lowered further. See the comment in the declaration of
     // 'emitIntermediateIR' for more details.
     target.addLegalOp<ONNXMatMulOp>(); // modified by p
-    // target.addLegalOp<ONNXReshapeOp>();
+    target.addLegalOp<ONNXReshapeOp>();
     // target.addLegalOp<ONNXSplitV11Op>();
     // target.addLegalOp<ONNXSqueezeV11Op>();
     target.addLegalOp<ONNXTransposeOp>(); // BERT needs this
 
+    target.addLegalOp<ONNXSoftmaxOp>(); // modified by p
+    target.addLegalOp<ONNXSliceOp>(); // modified by p
     target.addLegalOp<ONNXConvOp>(); // modified by p
     // target.addLegalOp<ONNXAddOp>(); // modified by p
     // target.addLegalOp<ONNXSubOp>(); // modified by p
@@ -413,10 +416,75 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
     // target.addLegalOp<ONNXFlattenOp>(); // modified by p (SqueezeNet needed)
     target.addLegalOp<ONNXMaxPoolSingleOutOp>(); // modified by p
     target.addLegalOp<ONNXAveragePoolOp>(); // modified by p
-    // target.addLegalOp<ONNXGatherOp>(); // modified by p (BERT needs this)
+    target.addLegalOp<ONNXGatherOp>(); // modified by p (BERT needs this)
     target.addLegalOp<ONNXReduceMeanV13Op>(); // modified by p (BERT fusion needs this)
     target.addLegalOp<ONNXReduceSumV11Op>(); // modified by p (BERT fusion needs this)
   }
+
+  // 定义检查函数：判断是否为 normalization/MHA 相关操作
+  auto isNormalizationLayerOp = [](Operation *op) -> bool {
+    if (auto nodeNameAttr = op->getAttrOfType<StringAttr>("onnx_node_name")) {
+      std::string nodeName = nodeNameAttr.getValue().str();
+      
+      // 匹配模式：/blocks.x/normx/ 
+      // 支持的模式示例：
+      // - /blocks.1/norm1/Sub
+      // - /blocks.0/norm2/Add  
+      // - /blocks.10/norm1/Sqrt
+      // std::regex normPattern(R"(/blocks\.\d+/norm\d+/.*)");
+      // std::regex normPattern(R"((/blocks\.\d+)?/norm\d*[_\d]*/.*)");
+      // std::regex normPattern(R"((/layer/layer[\._\d]+)?(/blocks\.\d+)?/norm\d*[_\d]*/.*)");
+      std::regex normPattern(R"((/layer/layer[\._\d]+)?(//blocks\.\d+)?/(attn\d*[_\d]*)/.*)");
+      return std::regex_match(nodeName, normPattern);
+    }
+    return false;
+  };
+
+  // 为特定的元素级操作添加动态合法性检查
+  target.addDynamicallyLegalOp<ONNXSubOp>([&](ONNXSubOp op) {
+    bool isNormOp = isNormalizationLayerOp(op.getOperation());
+    if (isNormOp) {
+      // LLVM_DEBUG(llvm::dbgs() << "Skipping Sub conversion for normalization layer: " 
+      //                         << op->getAttrOfType<StringAttr>("onnx_node_name").getValue() << "\n");
+    }
+    return isNormOp;
+  });
+
+  target.addDynamicallyLegalOp<ONNXMulOp>([&](ONNXMulOp op) {
+    bool isNormOp = isNormalizationLayerOp(op.getOperation());
+    if (isNormOp) {
+      // LLVM_DEBUG(llvm::dbgs() << "Skipping Mul conversion for normalization layer: " 
+      //                         << op->getAttrOfType<StringAttr>("onnx_node_name").getValue() << "\n");
+    }
+    return isNormOp;
+  });
+
+  target.addDynamicallyLegalOp<ONNXAddOp>([&](ONNXAddOp op) {
+    bool isNormOp = isNormalizationLayerOp(op.getOperation());
+    if (isNormOp) {
+      // LLVM_DEBUG(llvm::dbgs() << "Skipping Add conversion for normalization layer: " 
+      //                         << op->getAttrOfType<StringAttr>("onnx_node_name").getValue() << "\n");
+    }
+    return isNormOp;
+  });
+
+  target.addDynamicallyLegalOp<ONNXSqrtOp>([&](ONNXSqrtOp op) {
+    bool isNormOp = isNormalizationLayerOp(op.getOperation());
+    if (isNormOp) {
+      // LLVM_DEBUG(llvm::dbgs() << "Skipping Sqrt conversion for normalization layer: " 
+      //                         << op->getAttrOfType<StringAttr>("onnx_node_name").getValue() << "\n");
+    }
+    return isNormOp;
+  });
+
+  target.addDynamicallyLegalOp<ONNXDivOp>([&](ONNXDivOp op) {
+    bool isNormOp = isNormalizationLayerOp(op.getOperation());
+    if (isNormOp) {
+      // LLVM_DEBUG(llvm::dbgs() << "Skipping Div conversion for normalization layer: " 
+      //                         << op->getAttrOfType<StringAttr>("onnx_node_name").getValue() << "\n");
+    }
+    return isNormOp;
+  });
 
   // Conversion target for accelerators.
   for (auto *accel : onnx_mlir::accel::Accelerator::getAccelerators())

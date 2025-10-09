@@ -78,12 +78,14 @@ struct ONNXTransposeOpLowering : public OpConversionPattern<ONNXTransposeOp> {
     //
     // Otherwise, do element-wise copying.
 
-    if (auto numLastDims =
-            unchangedInnerDimensions(inMemRefType, outMemRefType, permAttr))
-      blockTranspose(
-          op, data, alloc, permAttr, &create, numLastDims, enableParallel);
-    else
-      scalarTranspose(op, data, alloc, permAttr, &create, enableParallel);
+    // if (auto numLastDims =
+    //         unchangedInnerDimensions(inMemRefType, outMemRefType, permAttr))
+    //   blockTranspose(
+    //       op, data, alloc, permAttr, &create, numLastDims, enableParallel);
+    // else
+    //   scalarTranspose(op, data, alloc, permAttr, &create, enableParallel);
+
+    scalarTranspose(op, data, alloc, permAttr, &create, enableParallel); // add py p
 
     rewriter.replaceOp(op, alloc);
     onnxToKrnlSimdReport(op);

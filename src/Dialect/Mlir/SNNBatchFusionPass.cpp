@@ -162,12 +162,12 @@ struct SNNBatchFusionPass
       return;
     }
     
-    // 7. 在重排完成后，执行batch fusion（现在会按相同的batch size进行）
-    LLVM_DEBUG(llvm::dbgs() << "\n=== Starting Batch Fusion (Batch Size: " << batchSize << ") ===\n");
-    if (!performBatchFusion(funcOp)) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed to perform batch fusion\n");
-      return;
-    }
+    // // 7. 在重排完成后，执行batch fusion（现在会按相同的batch size进行）
+    // LLVM_DEBUG(llvm::dbgs() << "\n=== Starting Batch Fusion (Batch Size: " << batchSize << ") ===\n");
+    // if (!performBatchFusion(funcOp)) {
+    //   LLVM_DEBUG(llvm::dbgs() << "Failed to perform batch fusion\n");
+    //   return;
+    // }
     
     LLVM_DEBUG(llvm::dbgs() << "Completed SNNBatchFusionPass\n");
   }
@@ -462,10 +462,12 @@ private:
       return "MatMul";
     } else if (opName == "onnx.Flatten") {
       return "Flatten";
-    }else if (opName == "onnx.ReduceMeanV13") {
+    } else if (opName == "onnx.ReduceMeanV13") {
       return "ReduceMean";
     } else if (opName == "onnx.Transpose") {
       return "Transpose";
+    } else if (opName == "onnx.Gather") {
+      return "Gather";
     }
     
     return "";
@@ -492,6 +494,8 @@ private:
       return "ReduceMean";
     } else if (cleanName.find("Transpose") != std::string::npos) {
       return "Transpose";
+    } else if (cleanName.find("Gather") != std::string::npos) {
+      return "Gather";
     }
     
     return cleanName;
@@ -997,6 +1001,7 @@ private:
            opName == "Gemm" || 
            opName == "MatMul"||
            opName == "ReduceMean"||
+           opName == "Gather"||
            opName == "Transpose";
   }
   
@@ -1048,9 +1053,13 @@ private:
       // 这里处理有非零bias的Gemm融合
       return fuseGemmOperations(builder, group);
     } else if (group.opType == "ReduceMean") {
-      return fuseReduceMeanOperations(builder, group);
+      // return fuseReduceMeanOperations(builder, group);
+      return true;
     } else if (group.opType == "Transpose") {  // 新增
-      return fuseTransposeOperations(builder, group);
+      // return fuseTransposeOperations(builder, group);
+      return true;
+    } else if (group.opType == "Gather") {  // 新增
+      return true;
     }
     
     LLVM_DEBUG(llvm::dbgs() << "Unknown operation type for fusion: " << group.opType << "\n");
