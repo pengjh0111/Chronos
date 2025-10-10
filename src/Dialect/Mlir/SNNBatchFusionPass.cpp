@@ -15,6 +15,7 @@
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/DenseSet.h"
+#include "llvm/Support/Regex.h"
 
 // 添加ONNX操作的头文件
 #include "src/Dialect/ONNX/ONNXOps.hpp"
@@ -162,12 +163,12 @@ struct SNNBatchFusionPass
       return;
     }
     
-    // // 7. 在重排完成后，执行batch fusion（现在会按相同的batch size进行）
-    // LLVM_DEBUG(llvm::dbgs() << "\n=== Starting Batch Fusion (Batch Size: " << batchSize << ") ===\n");
-    // if (!performBatchFusion(funcOp)) {
-    //   LLVM_DEBUG(llvm::dbgs() << "Failed to perform batch fusion\n");
-    //   return;
-    // }
+    // 7. 在重排完成后，执行batch fusion（现在会按相同的batch size进行）
+    LLVM_DEBUG(llvm::dbgs() << "\n=== Starting Batch Fusion (Batch Size: " << batchSize << ") ===\n");
+    if (!performBatchFusion(funcOp)) {
+      LLVM_DEBUG(llvm::dbgs() << "Failed to perform batch fusion\n");
+      return;
+    } 
     
     LLVM_DEBUG(llvm::dbgs() << "Completed SNNBatchFusionPass\n");
   }
@@ -468,6 +469,8 @@ private:
       return "Transpose";
     } else if (opName == "onnx.Gather") {
       return "Gather";
+    } else if (opName == "onnx.Div") {
+      return "Div";
     }
     
     return "";
@@ -496,6 +499,8 @@ private:
       return "Transpose";
     } else if (cleanName.find("Gather") != std::string::npos) {
       return "Gather";
+    } else if (cleanName.find("Div") != std::string::npos) {
+      return "Div";
     }
     
     return cleanName;
@@ -779,11 +784,14 @@ private:
     // 按 (layer_index, normalized_op_type) 收集所有可融合的操作
     std::map<std::pair<int, std::string>, SmallVector<std::pair<Operation*, int>>> tempGroupMap;
     
+    llvm::Regex layerPrefixPattern("^.*/layer/layer\\.[^/]+/[^/]");
+
     funcOp.walk([&](Operation* op) {
       if (auto nodeNameAttr = op->getAttrOfType<StringAttr>("onnx_node_name")) {
         StringRef nodeName = nodeNameAttr.getValue();
         
-        if (nodeName.contains("/layer/")) {
+        if (layerPrefixPattern.match(nodeName)) {
+        // if (nodeName.contains("/layer/")) {
           SimpleLayerInfo layerInfo = parseSimpleLayerInfo(nodeName, op); // 传递op指针
           
           // 检查是否是可融合的操作类型
@@ -920,7 +928,8 @@ private:
         SimpleLayerInfo layerInfo = parseSimpleLayerInfo(nodeName);
         // 时序操作通常包括激活函数、归一化等
         return !isFusibleOperationType(layerInfo.opName) && 
-               (layerInfo.opName.find("Div") != std::string::npos ||
+               (
+                // layerInfo.opName.find("Div") != std::string::npos ||
                 layerInfo.opName.find("Add") != std::string::npos ||
                 layerInfo.opName.find("Sub") != std::string::npos ||
                 layerInfo.opName.find("Mul") != std::string::npos ||
@@ -1002,7 +1011,8 @@ private:
            opName == "MatMul"||
            opName == "ReduceMean"||
            opName == "Gather"||
-           opName == "Transpose";
+           opName == "Transpose"||
+           opName == "Div";
   }
   
 
@@ -1059,6 +1069,8 @@ private:
       // return fuseTransposeOperations(builder, group);
       return true;
     } else if (group.opType == "Gather") {  // 新增
+      return true;
+    } else if (group.opType == "Div") {
       return true;
     }
     
