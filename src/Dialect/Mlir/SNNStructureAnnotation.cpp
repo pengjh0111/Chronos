@@ -367,7 +367,7 @@ private:
   std::set<std::string> targetOpTypes_ = {
     "onnx.Conv", "onnx.MaxPoolSingleOut", "onnx.Flatten", 
     "onnx.MatMul", "onnx.Gemm", "onnx.Add",
-    "onnx.ReduceMeanV13", "onnx.ReduceSumV11", "onnx.Transpose", "onnx.Gather", "onnx.Div"  // 新添加的操作类型
+    "onnx.ReduceMeanV13", "onnx.ReduceSumV11", "onnx.Transpose", "onnx.Gather", "onnx.Div" , "onnx.MHA" // 新添加的操作类型
   };
 
 public:
@@ -613,6 +613,8 @@ private:
       return "gather";
     } else if (normalized == "div") {
       return "div";
+    } else if (normalized == "mha") {
+      return "mha";
     }
     
     return normalized;
