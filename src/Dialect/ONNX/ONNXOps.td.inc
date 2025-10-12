@@ -11318,3 +11318,59 @@ def ONNXMomentumOp:ONNX_Op<"Momentum",
   }];
 }
 
+def ONNXMHAOp:ONNX_Op<"MHA",
+  [Pure]> {
+  let summary = "ONNX Multi-Head Attention operation";
+  let description = [{
+  Multi-Head Attention operation that performs scaled dot-product attention
+  with multiple attention heads.
+  
+  The operation computes attention over query (Q), key (K), and value (V) inputs,
+  optionally applying linear projections via the weights parameter.
+  
+  Attention windows can be specified via lo_win_idx and hi_win_idx for
+  windowed/local attention patterns.
+  
+  Input shapes:
+    Q: [batch_size, seq_len_q, q_size]
+    K: [batch_size, seq_len_k, k_size]
+    V: [batch_size, seq_len_k, v_size]
+    weights: Optional combined weights buffer
+    lo_win_idx: Optional lower attention window indices
+    hi_win_idx: Optional upper attention window indices
+  
+  Output shape:
+    output: [batch_size, seq_len_q, output_size]
+  }];
+  
+  let arguments = (ins 
+    AnyTypeOf<[TensorOf<[F16]>, TensorOf<[F32]>, TensorOf<[F64]>]>:$Q,
+    AnyTypeOf<[TensorOf<[F16]>, TensorOf<[F32]>, TensorOf<[F64]>]>:$K,
+    AnyTypeOf<[TensorOf<[F16]>, TensorOf<[F32]>, TensorOf<[F64]>]>:$V,
+    AnyTypeOf<[TensorOf<[F16]>, TensorOf<[F32]>, TensorOf<[F64]>, NoneType]>:$weights,
+    AnyTypeOf<[TensorOf<[I32]>, NoneType]>:$lo_win_idx,
+    AnyTypeOf<[TensorOf<[I32]>, NoneType]>:$hi_win_idx,
+    SI64Attr:$num_heads,
+    DefaultValuedAttr<SI64Attr, "0">:$q_proj_size,
+    DefaultValuedAttr<SI64Attr, "0">:$k_proj_size,
+    DefaultValuedAttr<SI64Attr, "0">:$v_proj_size,
+    DefaultValuedAttr<SI64Attr, "0">:$o_proj_size,
+    F64Attr:$sm_scaler
+  );
+  
+  let results = (outs 
+    AnyTypeOf<[TensorOf<[F16]>, TensorOf<[F32]>, TensorOf<[F64]>]>:$output
+  );
+  
+  let extraClassDeclaration = [{
+    static int getNumberOfOperands() {
+      return 6;
+    }
+    static int getNumberOfResults() {
+      return 1;
+    }
+    static std::vector<int> getTypeMap() {
+      return {30};
+    }
+  }];
+}

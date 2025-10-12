@@ -28,6 +28,8 @@ add_onnx_mlir_library(OMMlirDialects
   SNNBatchFusionPass.cpp
   SNNStructureAnnotation.cpp
   Lower4DMatMul.cpp
+  ConvertReduceMeanCallToAffineLoop.cpp
+  ConvertMHAPatternToOp.cpp
 
   DEPENDS
   OMKrnlIncGen
