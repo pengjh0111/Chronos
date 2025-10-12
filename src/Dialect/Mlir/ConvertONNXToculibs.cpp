@@ -8413,554 +8413,817 @@ public:
 //   }
 // };
 
-// // 调整权重复制位置
-// Pattern to convert Multi-Head Attention decomposed operations to a single cuDNN call
-class MultiHeadAttentionOpLowering : public OpRewritePattern<mlir::ONNXMatMulOp>, 
-                                     public ONNXToCuLibsPatternBase {
+// // // 调整权重复制位置
+// // Pattern to convert Multi-Head Attention decomposed operations to a single cuDNN call
+// class MultiHeadAttentionOpLowering : public OpRewritePattern<mlir::ONNXMatMulOp>, 
+//                                      public ONNXToCuLibsPatternBase {
+// public:
+//   using OpRewritePattern<mlir::ONNXMatMulOp>::OpRewritePattern;
+
+//   // 辅助函数：从Value中提取常量属性（支持onnx.Constant和krnl.global）
+//   static std::optional<Attribute> getConstantValue(Value value) {
+//     auto defOp = value.getDefiningOp();
+//     if (!defOp) return std::nullopt;
+    
+//     // 情况1: 直接是onnx.Constant
+//     if (auto constOp = dyn_cast<mlir::ONNXConstantOp>(defOp)) {
+//       return constOp.getValue();
+//     }
+    
+//     // 情况2: 是unrealized_conversion_cast，其输入来自krnl.global
+//     if (auto castOp = dyn_cast<UnrealizedConversionCastOp>(defOp)) {
+//       if (castOp.getNumOperands() == 1) {
+//         auto sourceOp = castOp.getOperand(0).getDefiningOp();
+//         if (sourceOp && sourceOp->getName().getStringRef() == "krnl.global") {
+//           // krnl.global的value属性存储了常量值
+//           if (auto valueAttr = sourceOp->getAttr("value")) {
+//             return valueAttr;
+//           }
+//         }
+//       }
+//     }
+    
+//     return std::nullopt;
+//   }
+
+//   // 辅助函数：检查Value是否来自常量
+//   static bool isConstantWeight(Value weight) {
+//     return getConstantValue(weight).has_value();
+//   }
+
+//   LogicalResult matchAndRewrite(mlir::ONNXMatMulOp outputProjMatMul, 
+//                                 PatternRewriter &rewriter) const override {
+//     Location loc = outputProjMatMul.getLoc();
+    
+//     LLVM_DEBUG(llvm::dbgs() << "Attempting to match MHA pattern starting from output projection MatMul at " 
+//                << loc << "\n");
+    
+//     llvm::SmallVector<Operation*> opsToErase;
+    
+//     // Step 1: 验证这是输出投影MatMul并获取其输入
+//     Value reshapedAttnOutput = outputProjMatMul.getA();
+//     Value outputProjWeight = outputProjMatMul.getB();
+    
+//     // 检查输出投影权重（可选检查，也可以直接用方案1放宽检查）
+//     if (!isConstantWeight(outputProjWeight)) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Output projection weight is not a constant\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "Output projection weight must be constant");
+//     }
+    
+//     // Step 2: 匹配Reshape
+//     auto finalReshapeOp = reshapedAttnOutput.getDefiningOp<mlir::ONNXReshapeOp>();
+//     if (!finalReshapeOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Input is not from Reshape\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "Expected Reshape before output projection");
+//     }
+//     opsToErase.push_back(finalReshapeOp);
+    
+//     // Step 3: 匹配Transpose
+//     Value transposedAttnOutput = finalReshapeOp.getData();
+//     auto finalTransposeOp = transposedAttnOutput.getDefiningOp<mlir::ONNXTransposeOp>();
+//     if (!finalTransposeOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Reshape input is not from Transpose\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "Expected Transpose before final Reshape");
+//     }
+//     opsToErase.push_back(finalTransposeOp);
+    
+//     // 验证Transpose的perm属性 [0, 2, 1, 3]
+//     auto finalTransposePerm = finalTransposeOp.getPerm();
+//     if (!finalTransposePerm || finalTransposePerm->size() != 4) {
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "Invalid transpose permutation");
+//     }
+    
+//     // Step 4: 匹配attention output MatMul
+//     Value attnOutputMatMulResult = finalTransposeOp.getData();
+//     auto attnOutputMatMul = attnOutputMatMulResult.getDefiningOp<mlir::ONNXMatMulOp>();
+//     if (!attnOutputMatMul) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Transpose input is not from MatMul\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "Expected MatMul (attention @ V)");
+//     }
+//     opsToErase.push_back(attnOutputMatMul);
+    
+//     Value attnWeights = attnOutputMatMul.getA();
+//     Value vTransposed = attnOutputMatMul.getB();
+    
+//     // Step 5: 匹配Softmax
+//     auto softmaxOp = attnWeights.getDefiningOp<mlir::ONNXSoftmaxOp>();
+//     if (!softmaxOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Attention weights not from Softmax\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, "Expected Softmax");
+//     }
+//     opsToErase.push_back(softmaxOp);
+    
+//     // Step 6: 匹配scale Mul
+//     Value scaledScores = softmaxOp.getInput();
+//     auto scaleMulOp = scaledScores.getDefiningOp<mlir::ONNXMulOp>();
+//     if (!scaleMulOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Softmax input not from Mul\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, "Expected scale Mul");
+//     }
+//     opsToErase.push_back(scaleMulOp);
+    
+//     Value qkScores = scaleMulOp.getA();
+//     Value scaleValue = scaleMulOp.getB();
+    
+//     // Step 7: 匹配QK MatMul
+//     auto qkMatMul = qkScores.getDefiningOp<mlir::ONNXMatMulOp>();
+//     if (!qkMatMul) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Scaled scores not from MatMul\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, "Expected Q*K^T MatMul");
+//     }
+//     opsToErase.push_back(qkMatMul);
+    
+//     Value qTransposed = qkMatMul.getA();
+//     Value kTransposed = qkMatMul.getB();
+    
+//     // Step 8-10: 匹配Q, K, V Transpose
+//     auto qTransposeOp = qTransposed.getDefiningOp<mlir::ONNXTransposeOp>();
+//     if (!qTransposeOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Q not from Transpose\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, "Expected Q Transpose");
+//     }
+//     opsToErase.push_back(qTransposeOp);
+    
+//     auto kTransposeOp = kTransposed.getDefiningOp<mlir::ONNXTransposeOp>();
+//     if (!kTransposeOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: K not from Transpose\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, "Expected K Transpose");
+//     }
+//     opsToErase.push_back(kTransposeOp);
+    
+//     auto vTransposeOp = vTransposed.getDefiningOp<mlir::ONNXTransposeOp>();
+//     if (!vTransposeOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: V not from Transpose\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, "Expected V Transpose");
+//     }
+//     opsToErase.push_back(vTransposeOp);
+    
+//     // Step 11-13: 匹配Q, K, V Reshape
+//     Value qReshaped = qTransposeOp.getData();
+//     auto qReshapeOp = qReshaped.getDefiningOp<mlir::ONNXReshapeOp>();
+//     if (!qReshapeOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Q Transpose input not from Reshape\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, "Expected Q Reshape");
+//     }
+//     opsToErase.push_back(qReshapeOp);
+    
+//     Value kReshaped = kTransposeOp.getData();
+//     auto kReshapeOp = kReshaped.getDefiningOp<mlir::ONNXReshapeOp>();
+//     if (!kReshapeOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: K Transpose input not from Reshape\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, "Expected K Reshape");
+//     }
+//     opsToErase.push_back(kReshapeOp);
+    
+//     Value vReshaped = vTransposeOp.getData();
+//     auto vReshapeOp = vReshaped.getDefiningOp<mlir::ONNXReshapeOp>();
+//     if (!vReshapeOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: V Transpose input not from Reshape\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, "Expected V Reshape");
+//     }
+//     opsToErase.push_back(vReshapeOp);
+    
+//     // Step 14-16: 匹配Q, K, V Slice
+//     Value qSliced = qReshapeOp.getData();
+//     auto qSliceOp = qSliced.getDefiningOp<mlir::ONNXSliceOp>();
+//     if (!qSliceOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Q Reshape input not from Slice\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, "Expected Q Slice");
+//     }
+//     opsToErase.push_back(qSliceOp);
+    
+//     Value kSliced = kReshapeOp.getData();
+//     auto kSliceOp = kSliced.getDefiningOp<mlir::ONNXSliceOp>();
+//     if (!kSliceOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: K Reshape input not from Slice\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, "Expected K Slice");
+//     }
+//     opsToErase.push_back(kSliceOp);
+    
+//     Value vSliced = vReshapeOp.getData();
+//     auto vSliceOp = vSliced.getDefiningOp<mlir::ONNXSliceOp>();
+//     if (!vSliceOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: V Reshape input not from Slice\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, "Expected V Slice");
+//     }
+//     opsToErase.push_back(vSliceOp);
+    
+//     // Step 17: 验证三个Slice来自同一个QKV投影MatMul
+//     Value qkvProjected = qSliceOp.getData();
+//     if (qkvProjected != kSliceOp.getData() || qkvProjected != vSliceOp.getData()) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Q, K, V slices from different sources\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "Q, K, V must be sliced from same QKV projection");
+//     }
+    
+//     // Step 18: 匹配QKV投影MatMul
+//     auto qkvProjMatMul = qkvProjected.getDefiningOp<mlir::ONNXMatMulOp>();
+//     if (!qkvProjMatMul) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: QKV not from MatMul\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, "Expected QKV projection MatMul");
+//     }
+//     opsToErase.push_back(qkvProjMatMul);
+    
+//     Value originalInput = qkvProjMatMul.getA();
+//     Value qkvWeight = qkvProjMatMul.getB();
+    
+//     // 检查QKV权重
+//     if (!isConstantWeight(qkvWeight)) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: QKV weight is not a constant\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "QKV projection weight must be constant");
+//     }
+    
+//     LLVM_DEBUG(llvm::dbgs() << "Successfully identified complete MHA pattern at " << loc << "\n");
+    
+//     // ========== 提取参数 ==========
+    
+//     // 从输入张量提取维度信息
+//     auto inputType = mlir::dyn_cast<RankedTensorType>(originalInput.getType());
+//     if (!inputType || !inputType.hasStaticShape()) {
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "Input must have static shape");
+//     }
+    
+//     auto inputShape = inputType.getShape();
+//     if (inputShape.size() != 3) {
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "Expected 3D input tensor [batch, seq_len, hidden_dim]");
+//     }
+    
+//     int64_t batch_size = inputShape[0];
+//     int64_t seq_len_q = inputShape[1];
+//     int64_t input_dim = inputShape[2];
+//     int64_t seq_len_k = seq_len_q;  // Self-attention
+    
+//     // 从QKV权重提取维度
+//     auto qkvWeightType = mlir::dyn_cast<RankedTensorType>(qkvWeight.getType());
+//     if (!qkvWeightType || !qkvWeightType.hasStaticShape()) {
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "QKV weight must have static shape");
+//     }
+    
+//     auto qkvWeightShape = qkvWeightType.getShape();
+//     if (qkvWeightShape.size() != 2) {
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "QKV weight must be 2D [input_dim, 3*proj_dim]");
+//     }
+    
+//     int64_t qkv_total_dim = qkvWeightShape[1];
+//     int64_t single_proj_dim = qkv_total_dim / 3;
+    
+//     // ========== 修改：从Q Reshape操作提取num_heads和head_dim ==========
+//     Value qReshapeShape = qReshapeOp.getShape();
+//     auto qReshapeShapeAttrOpt = getConstantValue(qReshapeShape);
+    
+//     if (!qReshapeShapeAttrOpt.has_value()) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Cannot extract Q Reshape shape constant\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "Q Reshape shape must be constant");
+//     }
+    
+//     auto qReshapeShapeDense = mlir::dyn_cast<DenseElementsAttr>(qReshapeShapeAttrOpt.value());
+//     if (!qReshapeShapeDense) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Q Reshape shape is not dense\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "Q Reshape shape must be dense");
+//     }
+    
+//     // 提取reshape shape: [batch, seq_len, num_heads, head_dim]
+//     auto qReshapeValues = qReshapeShapeDense.getValues<int64_t>();
+//     if (qReshapeValues.size() != 4) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: Q Reshape shape is not 4D\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "Q Reshape must be 4D");
+//     }
+    
+//     int64_t num_heads = *(qReshapeValues.begin() + 2);
+//     int64_t head_dim = *(qReshapeValues.begin() + 3);
+    
+//     // 验证维度一致性
+//     if (single_proj_dim != num_heads * head_dim) {
+//       LLVM_DEBUG(llvm::dbgs() << "Failed: single_proj_dim=" << single_proj_dim 
+//                  << " != num_heads*head_dim=" << (num_heads * head_dim) << "\n");
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "Projection dimension mismatch");
+//     }
+    
+//     int64_t per_head_proj_dim = head_dim;  // 单个head的投影维度
+
+//     // 从输出投影权重提取输出维度
+//     auto outputProjWeightType = mlir::dyn_cast<RankedTensorType>(
+//       outputProjWeight.getType());
+//     if (!outputProjWeightType || !outputProjWeightType.hasStaticShape()) {
+//       return rewriter.notifyMatchFailure(outputProjMatMul, 
+//         "Output projection weight must have static shape");
+//     }
+    
+//     auto outputProjWeightShape = outputProjWeightType.getShape();
+//     int64_t output_dim = outputProjWeightShape[1];
+    
+//     // ========== 修改：提取scale值 ==========
+//     double sm_scaler = 1.0;
+//     auto scaleAttrOpt = getConstantValue(scaleValue);
+//     if (scaleAttrOpt.has_value()) {
+//       if (auto denseAttr = mlir::dyn_cast<DenseElementsAttr>(scaleAttrOpt.value())) {
+//         if (denseAttr.isSplat()) {
+//           auto splatValue = denseAttr.getSplatValue<APFloat>();
+//           sm_scaler = splatValue.convertToDouble();
+//         } else if (denseAttr.getNumElements() > 0) {
+//           // 如果不是splat，取第一个元素
+//           auto values = denseAttr.getValues<APFloat>();
+//           sm_scaler = (*values.begin()).convertToDouble();
+//         }
+//       } else if (auto floatAttr = mlir::dyn_cast<FloatAttr>(scaleAttrOpt.value())) {
+//         sm_scaler = floatAttr.getValueAsDouble();
+//       }
+//     } else {
+//       LLVM_DEBUG(llvm::dbgs() << "Warning: Cannot extract scale value, using default 1.0\n");
+//     }
+    
+//     LLVM_DEBUG(llvm::dbgs() << "MHA dimensions:\n"
+//                << "  batch_size=" << batch_size << "\n"
+//                << "  num_heads=" << num_heads << "\n"
+//                << "  seq_len_q=" << seq_len_q << "\n"
+//                << "  seq_len_k=" << seq_len_k << "\n"
+//                << "  input_dim=" << input_dim << "\n"
+//                << "  proj_dim=" << single_proj_dim << "\n"
+//                << "  head_dim=" << head_dim << "\n"
+//                << "  output_dim=" << output_dim << "\n"
+//                << "  sm_scaler=" << sm_scaler << "\n");
+    
+//     // ========== 调整插入点并合并权重 ==========
+    
+//     // 在作用域外声明需要后续使用的变量
+//     Value weightsDataPtr;
+    
+//     {
+//       // 保存当前插入点
+//       OpBuilder::InsertionGuard guard(rewriter);
+      
+//       // 辅助函数：追溯到原始的定义操作
+//       auto findOriginalDefOp = [](Value weight) -> Operation* {
+//         Value current = weight;
+        
+//         // 如果是 unrealized_conversion_cast，追溯到其输入
+//         while (auto castOp = current.getDefiningOp<UnrealizedConversionCastOp>()) {
+//           if (castOp.getNumOperands() > 0) {
+//             current = castOp.getOperand(0);
+//           } else {
+//             break;
+//           }
+//         }
+        
+//         return current.getDefiningOp();
+//       };
+      
+//       // 辅助函数：找到定义操作之后的最后一个相关操作
+//       auto findLastOp = [](Operation* defOp) -> Operation* {
+//         if (!defOp) return nullptr;
+        
+//         // 检查是否有 unrealized_conversion_cast 使用这个定义
+//         for (auto user : defOp->getUsers()) {
+//           if (isa<UnrealizedConversionCastOp>(user)) {
+//             return user;
+//           }
+//         }
+//         return defOp;
+//       };
+      
+//       // 找到 QKV 权重和输出投影权重的定义
+//       Operation* qkvWeightDefOp = findOriginalDefOp(qkvWeight);
+//       Operation* outputProjWeightDefOp = findOriginalDefOp(outputProjWeight);
+//       Operation* qkvLastOp = findLastOp(qkvWeightDefOp);
+//       Operation* outputLastOp = findLastOp(outputProjWeightDefOp);
+      
+//       // 找到两个权重定义序列中位置靠后的那个
+//       Operation* lastWeightDefOp = nullptr;
+//       if (qkvLastOp && outputLastOp) {
+//         // 检查它们是否在同一个 block 中
+//         if (qkvLastOp->getBlock() == outputLastOp->getBlock()) {
+//           lastWeightDefOp = qkvLastOp->isBeforeInBlock(outputLastOp) 
+//                             ? outputLastOp : qkvLastOp;
+//         } else {
+//           LLVM_DEBUG(llvm::dbgs() << "Warning: Weight definitions in different blocks\n");
+//           lastWeightDefOp = outputLastOp; // 使用输出权重的位置
+//         }
+//       } else if (qkvLastOp) {
+//         lastWeightDefOp = qkvLastOp;
+//       } else if (outputLastOp) {
+//         lastWeightDefOp = outputLastOp;
+//       }
+      
+//       // 设置插入点到权重定义之后
+//       if (lastWeightDefOp) {
+//         LLVM_DEBUG(llvm::dbgs() << "Setting insertion point after weight definitions\n");
+//         rewriter.setInsertionPointAfter(lastWeightDefOp);
+//       } else {
+//         LLVM_DEBUG(llvm::dbgs() << "Warning: Could not find weight definitions, "
+//                                 << "using current insertion point\n");
+//       }
+      
+//       // ========== 在新的插入点合并权重 ==========
+      
+//       auto markForBufferization = [&](Value tensor) -> Value {
+//         auto tensorType = tensor.getType().cast<RankedTensorType>();
+//         auto memrefType = MemRefType::get(
+//           tensorType.getShape(),
+//           tensorType.getElementType());
+//         return rewriter.create<UnrealizedConversionCastOp>(
+//           loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
+//       };
+      
+//       auto getPtr = [&](Value memref) -> Value {
+//         auto indexType = rewriter.getIndexType();
+//         auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(
+//           loc, indexType, memref);
+//         auto i64Type = rewriter.getIntegerType(64);
+//         auto ptrI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, ptrIndex);
+//         auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+//         return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrI64);
+//       };
+      
+//       auto qkvWeightMemref = markForBufferization(qkvWeight);
+//       auto outputProjWeightMemref = markForBufferization(outputProjWeight);
+
+//       auto qkvMemrefType = qkvWeightMemref.getType().cast<MemRefType>();
+//       auto outputProjMemrefType = outputProjWeightMemref.getType().cast<MemRefType>();
+
+//       int64_t qkv_rows = qkvMemrefType.getShape()[0];
+//       int64_t qkv_cols = qkvMemrefType.getShape()[1];
+//       int64_t output_rows = outputProjMemrefType.getShape()[0];
+//       int64_t output_cols = outputProjMemrefType.getShape()[1];
+
+//       if (qkv_rows != output_rows) {
+//         LLVM_DEBUG(llvm::dbgs() << "Error: QKV weight rows (" << qkv_rows 
+//                   << ") != Output weight rows (" << output_rows << ")\n");
+//         return rewriter.notifyMatchFailure(outputProjMatMul, 
+//           "QKV and output projection weights have incompatible dimensions");
+//       }
+
+//       int64_t rows = qkv_rows;
+//       int64_t total_cols = qkv_cols + output_cols;
+
+//       auto combinedWeightType = MemRefType::get(
+//         {rows, total_cols}, 
+//         qkvMemrefType.getElementType()
+//       );
+
+//       auto combinedWeightMemref = rewriter.create<memref::AllocOp>(
+//         loc, 
+//         combinedWeightType,
+//         ValueRange{},
+//         rewriter.getI64IntegerAttr(16)
+//       );
+
+//       LLVM_DEBUG(llvm::dbgs() << "Allocated combined weight buffer: " 
+//                 << rows << "x" << total_cols << "\n");
+
+//       // 创建subview
+//       SmallVector<OpFoldResult> qkvOffsets = {
+//         rewriter.getIndexAttr(0), 
+//         rewriter.getIndexAttr(0)
+//       };
+//       SmallVector<OpFoldResult> qkvSizes = {
+//         rewriter.getIndexAttr(rows), 
+//         rewriter.getIndexAttr(qkv_cols)
+//       };
+//       SmallVector<OpFoldResult> qkvStrides = {
+//         rewriter.getIndexAttr(1), 
+//         rewriter.getIndexAttr(1)
+//       };
+
+//       auto qkvSubview = rewriter.create<memref::SubViewOp>(
+//         loc, combinedWeightMemref, qkvOffsets, qkvSizes, qkvStrides
+//       );
+
+//       SmallVector<OpFoldResult> outputOffsets = {
+//         rewriter.getIndexAttr(0), 
+//         rewriter.getIndexAttr(qkv_cols)
+//       };
+//       SmallVector<OpFoldResult> outputSizes = {
+//         rewriter.getIndexAttr(rows), 
+//         rewriter.getIndexAttr(output_cols)
+//       };
+//       SmallVector<OpFoldResult> outputStrides = {
+//         rewriter.getIndexAttr(1), 
+//         rewriter.getIndexAttr(1)
+//       };
+
+//       auto outputSubview = rewriter.create<memref::SubViewOp>(
+//         loc, combinedWeightMemref, outputOffsets, outputSizes, outputStrides
+//       );
+
+//       // 异步复制权重
+//       auto qkvCopyStream = rewriter.create<gpu::WaitOp>(
+//         loc, gpu::AsyncTokenType::get(rewriter.getContext()), ValueRange{}
+//       );
+//       auto outputCopyStream = rewriter.create<gpu::WaitOp>(
+//         loc, gpu::AsyncTokenType::get(rewriter.getContext()), ValueRange{}
+//       );
+
+//       auto qkvCopyToken = rewriter.create<gpu::MemcpyOp>(
+//         loc, 
+//         gpu::AsyncTokenType::get(rewriter.getContext()),
+//         ValueRange{qkvCopyStream.getAsyncToken()},
+//         qkvSubview.getResult(),
+//         qkvWeightMemref
+//       );
+
+//       auto outputCopyToken = rewriter.create<gpu::MemcpyOp>(
+//         loc, 
+//         gpu::AsyncTokenType::get(rewriter.getContext()),
+//         ValueRange{outputCopyStream.getAsyncToken()},
+//         outputSubview.getResult(),
+//         outputProjWeightMemref
+//       );
+
+//       SmallVector<Value> weightCopyTokens = {
+//         qkvCopyToken.getAsyncToken(), 
+//         outputCopyToken.getAsyncToken()
+//       };
+//       rewriter.create<gpu::WaitOp>(loc, Type{}, weightCopyTokens);
+
+//       weightsDataPtr = getPtr(combinedWeightMemref);
+      
+//       LLVM_DEBUG(llvm::dbgs() << "Weight merging completed at early insertion point\n");
+      
+//     } // InsertionGuard 结束，恢复到原来的插入点
+    
+//     // ========== 生成cuDNN调用（在原插入点）==========
+    
+//     auto i32Type = rewriter.getI32Type();
+//     auto f64Type = rewriter.getF64Type();
+//     auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
+//     auto tokenType = gpu::AsyncTokenType::get(rewriter.getContext());
+    
+//     auto createI32Const = [&](int64_t value) -> Value {
+//       return rewriter.create<arith::ConstantOp>(
+//         loc, i32Type, rewriter.getI32IntegerAttr(value));
+//     };
+    
+//     auto createF64Const = [&](double value) -> Value {
+//       return rewriter.create<arith::ConstantOp>(
+//         loc, f64Type, rewriter.getF64FloatAttr(value));
+//     };
+    
+//     // 创建参数常量
+//     auto batchSizeValue = createI32Const(batch_size);
+//     auto numHeadsValue = createI32Const(num_heads);
+//     auto seqLenQValue = createI32Const(seq_len_q);
+//     auto seqLenKValue = createI32Const(seq_len_k);
+//     auto qSizeValue = createI32Const(input_dim);
+//     auto kSizeValue = createI32Const(input_dim);
+//     auto vSizeValue = createI32Const(input_dim);
+//     auto qProjSizeValue = createI32Const(per_head_proj_dim);
+//     auto kProjSizeValue = createI32Const(per_head_proj_dim);
+//     auto vProjSizeValue = createI32Const(per_head_proj_dim);
+//     auto oProjSizeValue = createI32Const(output_dim);
+//     auto smScalerValue = createF64Const(sm_scaler);
+    
+//     // 准备输入和输出的memref
+//     auto markForBufferization = [&](Value tensor) -> Value {
+//       auto tensorType = tensor.getType().cast<RankedTensorType>();
+//       auto memrefType = MemRefType::get(
+//         tensorType.getShape(),
+//         tensorType.getElementType());
+//       return rewriter.create<UnrealizedConversionCastOp>(
+//         loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
+//     };
+    
+//     auto getPtr = [&](Value memref) -> Value {
+//       auto indexType = rewriter.getIndexType();
+//       auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(
+//         loc, indexType, memref);
+//       auto i64Type = rewriter.getIntegerType(64);
+//       auto ptrI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, ptrIndex);
+//       return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrI64);
+//     };
+    
+//     // 输入数据指针
+//     auto inputMemref = markForBufferization(originalInput);
+//     auto qDataPtr = getPtr(inputMemref);
+//     auto kDataPtr = qDataPtr;
+//     auto vDataPtr = qDataPtr;
+    
+//     // 分配输出memref
+//     auto outputType = mlir::dyn_cast<RankedTensorType>(
+//       outputProjMatMul.getResult().getType());
+//     auto outputMemrefType = MemRefType::get(
+//       outputType.getShape(), outputType.getElementType());
+//     auto outputMemref = rewriter.create<memref::AllocOp>(loc, outputMemrefType);
+//     auto outputDataPtr = getPtr(outputMemref);
+    
+//     // 创建null指针
+//     MultiDialectBuilder<LLVMBuilder> create(rewriter, loc);
+//     auto nullPtr = create.llvm.null(ptrType);
+    
+//     // 创建CUDA流
+//     auto moduleOp = outputProjMatMul->getParentOfType<ModuleOp>();
+    
+//     func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
+//     if (!streamCreateFunc) {
+//       OpBuilder::InsertionGuard guard(rewriter);
+//       rewriter.setInsertionPointToStart(moduleOp.getBody());
+//       auto streamCreateType = rewriter.getFunctionType({}, {ptrType});
+//       streamCreateFunc = rewriter.create<func::FuncOp>(
+//         loc, "mgpuStreamCreate", streamCreateType);
+//       streamCreateFunc.setPrivate();
+//     }
+    
+//     func::FuncOp handleCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuCreateHandlesForStream");
+//     if (!handleCreateFunc) {
+//       OpBuilder::InsertionGuard guard(rewriter);
+//       rewriter.setInsertionPointToStart(moduleOp.getBody());
+//       auto handleCreateType = rewriter.getFunctionType({ptrType}, {});
+//       handleCreateFunc = rewriter.create<func::FuncOp>(
+//         loc, "mgpuCreateHandlesForStream", handleCreateType);
+//       handleCreateFunc.setPrivate();
+//     }
+    
+//     auto streamCallOp = rewriter.create<func::CallOp>(
+//       loc, TypeRange{ptrType}, streamCreateFunc.getName(), ValueRange{});
+//     auto streamPtr = streamCallOp.getResult(0);
+    
+//     rewriter.create<func::CallOp>(
+//       loc, TypeRange{}, "mgpuCreateHandlesForStream", ValueRange{streamPtr});
+    
+//     // 创建MHA函数声明
+//     std::string functionName = "mgpuCudnnMultiHeadAttention";
+//     func::FuncOp funcOp = moduleOp.lookupSymbol<func::FuncOp>(functionName);
+    
+//     if (!funcOp) {
+//       LLVM_DEBUG(llvm::dbgs() << "Creating " << functionName << " declaration\n");
+//       OpBuilder::InsertionGuard guard(rewriter);
+//       rewriter.setInsertionPointToStart(moduleOp.getBody());
+      
+//       auto funcType = rewriter.getFunctionType({
+//         i32Type, i32Type, i32Type, i32Type,
+//         i32Type, i32Type, i32Type,
+//         i32Type, i32Type, i32Type, i32Type,
+//         f64Type,
+//         ptrType, ptrType, ptrType,
+//         ptrType,
+//         ptrType,
+//         ptrType, ptrType,
+//         ptrType
+//       }, {});
+      
+//       funcOp = rewriter.create<func::FuncOp>(loc, functionName, funcType);
+//       funcOp.setPrivate();
+//     }
+    
+//     // 调用MHA函数
+//     std::vector<Value> args = {
+//       batchSizeValue, numHeadsValue, seqLenQValue, seqLenKValue,
+//       qSizeValue, kSizeValue, vSizeValue,
+//       qProjSizeValue, kProjSizeValue, vProjSizeValue, oProjSizeValue,
+//       smScalerValue,
+//       qDataPtr, kDataPtr, vDataPtr,
+//       weightsDataPtr,
+//       outputDataPtr,
+//       nullPtr, nullPtr,
+//       streamPtr
+//     };
+    
+//     Attribute onnxNodeNameAttr = outputProjMatMul->getAttr("onnx_node_name");
+//     auto callOp = rewriter.create<func::CallOp>(
+//       loc, TypeRange(), funcOp.getName(), ValueRange(args));
+    
+//     if (onnxNodeNameAttr) {
+//       callOp->setAttr("onnx_node_name", onnxNodeNameAttr);
+//     }
+    
+//     // 同步并销毁流
+//     func::FuncOp streamSyncFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamSynchronize");
+//     if (!streamSyncFunc) {
+//       OpBuilder::InsertionGuard guard(rewriter);
+//       rewriter.setInsertionPointToStart(moduleOp.getBody());
+//       auto streamSyncType = rewriter.getFunctionType({ptrType}, {});
+//       streamSyncFunc = rewriter.create<func::FuncOp>(
+//         loc, "mgpuStreamSynchronize", streamSyncType);
+//       streamSyncFunc.setPrivate();
+//     }
+//     rewriter.create<func::CallOp>(
+//       loc, TypeRange(), streamSyncFunc.getName(), ValueRange{streamPtr});
+    
+//     func::FuncOp streamDestroyFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamDestroy");
+//     if (!streamDestroyFunc) {
+//       OpBuilder::InsertionGuard guard(rewriter);
+//       rewriter.setInsertionPointToStart(moduleOp.getBody());
+//       auto streamDestroyType = rewriter.getFunctionType({ptrType}, {});
+//       streamDestroyFunc = rewriter.create<func::FuncOp>(
+//         loc, "mgpuStreamDestroy", streamDestroyType);
+//       streamDestroyFunc.setPrivate();
+//     }
+//     rewriter.create<func::CallOp>(
+//       loc, TypeRange(), streamDestroyFunc.getName(), ValueRange{streamPtr});
+    
+//     // 将memref转换回tensor
+//     auto resultTensor = rewriter.create<UnrealizedConversionCastOp>(
+//       loc, TypeRange{outputType}, ValueRange{outputMemref}).getResult(0);
+    
+//     // 替换输出投影MatMul
+//     rewriter.replaceOp(outputProjMatMul, resultTensor);
+    
+//     // 清理中间操作
+//     std::vector<Operation*> safeToDelete;
+//     for (Operation* op : opsToErase) {
+//       if (op && op->getBlock() && op->use_empty()) {
+//         safeToDelete.push_back(op);
+//       }
+//     }
+    
+//     for (Operation* op : safeToDelete) {
+//       if (op && op->getBlock() && op->use_empty()) {
+//         rewriter.eraseOp(op);
+//       }
+//     }
+    
+//     LLVM_DEBUG(llvm::dbgs() << "Successfully converted MHA pattern to cuDNN call\n");
+//     return success();
+//   }
+// };
+
+// Pattern to convert onnx.MHA operation to cuDNN call
+class MHAOpLowering : public OpRewritePattern<mlir::ONNXMHAOp>, 
+                      public ONNXToCuLibsPatternBase {
 public:
-  using OpRewritePattern<mlir::ONNXMatMulOp>::OpRewritePattern;
+  using OpRewritePattern<mlir::ONNXMHAOp>::OpRewritePattern;
 
-  // 辅助函数：从Value中提取常量属性（支持onnx.Constant和krnl.global）
-  static std::optional<Attribute> getConstantValue(Value value) {
-    auto defOp = value.getDefiningOp();
-    if (!defOp) return std::nullopt;
-    
-    // 情况1: 直接是onnx.Constant
-    if (auto constOp = dyn_cast<mlir::ONNXConstantOp>(defOp)) {
-      return constOp.getValue();
-    }
-    
-    // 情况2: 是unrealized_conversion_cast，其输入来自krnl.global
-    if (auto castOp = dyn_cast<UnrealizedConversionCastOp>(defOp)) {
-      if (castOp.getNumOperands() == 1) {
-        auto sourceOp = castOp.getOperand(0).getDefiningOp();
-        if (sourceOp && sourceOp->getName().getStringRef() == "krnl.global") {
-          // krnl.global的value属性存储了常量值
-          if (auto valueAttr = sourceOp->getAttr("value")) {
-            return valueAttr;
-          }
-        }
-      }
-    }
-    
-    return std::nullopt;
-  }
-
-  // 辅助函数：检查Value是否来自常量
-  static bool isConstantWeight(Value weight) {
-    return getConstantValue(weight).has_value();
-  }
-
-  LogicalResult matchAndRewrite(mlir::ONNXMatMulOp outputProjMatMul, 
+  LogicalResult matchAndRewrite(mlir::ONNXMHAOp mhaOp, 
                                 PatternRewriter &rewriter) const override {
-    Location loc = outputProjMatMul.getLoc();
+    Location loc = mhaOp.getLoc();
     
-    LLVM_DEBUG(llvm::dbgs() << "Attempting to match MHA pattern starting from output projection MatMul at " 
-               << loc << "\n");
+    LLVM_DEBUG(llvm::dbgs() << "Converting onnx.MHA to cuDNN call at " << loc << "\n");
     
-    llvm::SmallVector<Operation*> opsToErase;
+    // ========== 获取操作数 ==========
+    Value qInput = mhaOp.getQ();
+    Value kInput = mhaOp.getK();
+    Value vInput = mhaOp.getV();
+    Value weights = mhaOp.getWeights();
+    Value loWinIdx = mhaOp.getLoWinIdx();
+    Value hiWinIdx = mhaOp.getHiWinIdx();
     
-    // Step 1: 验证这是输出投影MatMul并获取其输入
-    Value reshapedAttnOutput = outputProjMatMul.getA();
-    Value outputProjWeight = outputProjMatMul.getB();
+    // ========== 获取属性 ==========
+    int64_t num_heads = mhaOp.getNumHeads();
+    int64_t q_proj_size = mhaOp.getQProjSize();
+    int64_t k_proj_size = mhaOp.getKProjSize();
+    int64_t v_proj_size = mhaOp.getVProjSize();
+    int64_t o_proj_size = mhaOp.getOProjSize();
+    double sm_scaler = mhaOp.getSmScaler().convertToDouble();
     
-    // 检查输出投影权重（可选检查，也可以直接用方案1放宽检查）
-    if (!isConstantWeight(outputProjWeight)) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Output projection weight is not a constant\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "Output projection weight must be constant");
+    // ========== 提取维度信息 ==========
+    auto qType = mlir::dyn_cast<RankedTensorType>(qInput.getType());
+    auto kType = mlir::dyn_cast<RankedTensorType>(kInput.getType());
+    auto vType = mlir::dyn_cast<RankedTensorType>(vInput.getType());
+    
+    if (!qType || !kType || !vType || 
+        !qType.hasStaticShape() || !kType.hasStaticShape() || !vType.hasStaticShape()) {
+      return rewriter.notifyMatchFailure(mhaOp, 
+        "Q, K, V must have static shapes");
     }
     
-    // Step 2: 匹配Reshape
-    auto finalReshapeOp = reshapedAttnOutput.getDefiningOp<mlir::ONNXReshapeOp>();
-    if (!finalReshapeOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Input is not from Reshape\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "Expected Reshape before output projection");
-    }
-    opsToErase.push_back(finalReshapeOp);
+    auto qShape = qType.getShape();
+    auto kShape = kType.getShape();
+    auto vShape = vType.getShape();
     
-    // Step 3: 匹配Transpose
-    Value transposedAttnOutput = finalReshapeOp.getData();
-    auto finalTransposeOp = transposedAttnOutput.getDefiningOp<mlir::ONNXTransposeOp>();
-    if (!finalTransposeOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Reshape input is not from Transpose\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "Expected Transpose before final Reshape");
-    }
-    opsToErase.push_back(finalTransposeOp);
-    
-    // 验证Transpose的perm属性 [0, 2, 1, 3]
-    auto finalTransposePerm = finalTransposeOp.getPerm();
-    if (!finalTransposePerm || finalTransposePerm->size() != 4) {
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "Invalid transpose permutation");
+    if (qShape.size() != 3 || kShape.size() != 3 || vShape.size() != 3) {
+      return rewriter.notifyMatchFailure(mhaOp, 
+        "Q, K, V must be 3D tensors [batch, seq_len, feature_dim]");
     }
     
-    // Step 4: 匹配attention output MatMul
-    Value attnOutputMatMulResult = finalTransposeOp.getData();
-    auto attnOutputMatMul = attnOutputMatMulResult.getDefiningOp<mlir::ONNXMatMulOp>();
-    if (!attnOutputMatMul) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Transpose input is not from MatMul\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "Expected MatMul (attention @ V)");
-    }
-    opsToErase.push_back(attnOutputMatMul);
+    int64_t batch_size = qShape[0];
+    int64_t seq_len_q = qShape[1];
+    int64_t q_size = qShape[2];
+    int64_t seq_len_k = kShape[1];
+    int64_t k_size = kShape[2];
+    int64_t v_size = vShape[2];
     
-    Value attnWeights = attnOutputMatMul.getA();
-    Value vTransposed = attnOutputMatMul.getB();
-    
-    // Step 5: 匹配Softmax
-    auto softmaxOp = attnWeights.getDefiningOp<mlir::ONNXSoftmaxOp>();
-    if (!softmaxOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Attention weights not from Softmax\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, "Expected Softmax");
-    }
-    opsToErase.push_back(softmaxOp);
-    
-    // Step 6: 匹配scale Mul
-    Value scaledScores = softmaxOp.getInput();
-    auto scaleMulOp = scaledScores.getDefiningOp<mlir::ONNXMulOp>();
-    if (!scaleMulOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Softmax input not from Mul\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, "Expected scale Mul");
-    }
-    opsToErase.push_back(scaleMulOp);
-    
-    Value qkScores = scaleMulOp.getA();
-    Value scaleValue = scaleMulOp.getB();
-    
-    // Step 7: 匹配QK MatMul
-    auto qkMatMul = qkScores.getDefiningOp<mlir::ONNXMatMulOp>();
-    if (!qkMatMul) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Scaled scores not from MatMul\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, "Expected Q*K^T MatMul");
-    }
-    opsToErase.push_back(qkMatMul);
-    
-    Value qTransposed = qkMatMul.getA();
-    Value kTransposed = qkMatMul.getB();
-    
-    // Step 8-10: 匹配Q, K, V Transpose
-    auto qTransposeOp = qTransposed.getDefiningOp<mlir::ONNXTransposeOp>();
-    if (!qTransposeOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Q not from Transpose\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, "Expected Q Transpose");
-    }
-    opsToErase.push_back(qTransposeOp);
-    
-    auto kTransposeOp = kTransposed.getDefiningOp<mlir::ONNXTransposeOp>();
-    if (!kTransposeOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: K not from Transpose\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, "Expected K Transpose");
-    }
-    opsToErase.push_back(kTransposeOp);
-    
-    auto vTransposeOp = vTransposed.getDefiningOp<mlir::ONNXTransposeOp>();
-    if (!vTransposeOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: V not from Transpose\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, "Expected V Transpose");
-    }
-    opsToErase.push_back(vTransposeOp);
-    
-    // Step 11-13: 匹配Q, K, V Reshape
-    Value qReshaped = qTransposeOp.getData();
-    auto qReshapeOp = qReshaped.getDefiningOp<mlir::ONNXReshapeOp>();
-    if (!qReshapeOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Q Transpose input not from Reshape\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, "Expected Q Reshape");
-    }
-    opsToErase.push_back(qReshapeOp);
-    
-    Value kReshaped = kTransposeOp.getData();
-    auto kReshapeOp = kReshaped.getDefiningOp<mlir::ONNXReshapeOp>();
-    if (!kReshapeOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: K Transpose input not from Reshape\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, "Expected K Reshape");
-    }
-    opsToErase.push_back(kReshapeOp);
-    
-    Value vReshaped = vTransposeOp.getData();
-    auto vReshapeOp = vReshaped.getDefiningOp<mlir::ONNXReshapeOp>();
-    if (!vReshapeOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: V Transpose input not from Reshape\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, "Expected V Reshape");
-    }
-    opsToErase.push_back(vReshapeOp);
-    
-    // Step 14-16: 匹配Q, K, V Slice
-    Value qSliced = qReshapeOp.getData();
-    auto qSliceOp = qSliced.getDefiningOp<mlir::ONNXSliceOp>();
-    if (!qSliceOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Q Reshape input not from Slice\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, "Expected Q Slice");
-    }
-    opsToErase.push_back(qSliceOp);
-    
-    Value kSliced = kReshapeOp.getData();
-    auto kSliceOp = kSliced.getDefiningOp<mlir::ONNXSliceOp>();
-    if (!kSliceOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: K Reshape input not from Slice\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, "Expected K Slice");
-    }
-    opsToErase.push_back(kSliceOp);
-    
-    Value vSliced = vReshapeOp.getData();
-    auto vSliceOp = vSliced.getDefiningOp<mlir::ONNXSliceOp>();
-    if (!vSliceOp) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: V Reshape input not from Slice\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, "Expected V Slice");
-    }
-    opsToErase.push_back(vSliceOp);
-    
-    // Step 17: 验证三个Slice来自同一个QKV投影MatMul
-    Value qkvProjected = qSliceOp.getData();
-    if (qkvProjected != kSliceOp.getData() || qkvProjected != vSliceOp.getData()) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Q, K, V slices from different sources\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "Q, K, V must be sliced from same QKV projection");
-    }
-    
-    // Step 18: 匹配QKV投影MatMul
-    auto qkvProjMatMul = qkvProjected.getDefiningOp<mlir::ONNXMatMulOp>();
-    if (!qkvProjMatMul) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: QKV not from MatMul\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, "Expected QKV projection MatMul");
-    }
-    opsToErase.push_back(qkvProjMatMul);
-    
-    Value originalInput = qkvProjMatMul.getA();
-    Value qkvWeight = qkvProjMatMul.getB();
-    
-    // 检查QKV权重
-    if (!isConstantWeight(qkvWeight)) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: QKV weight is not a constant\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "QKV projection weight must be constant");
-    }
-    
-    LLVM_DEBUG(llvm::dbgs() << "Successfully identified complete MHA pattern at " << loc << "\n");
-    
-    // ========== 提取参数 ==========
-    
-    // 从输入张量提取维度信息
-    auto inputType = mlir::dyn_cast<RankedTensorType>(originalInput.getType());
-    if (!inputType || !inputType.hasStaticShape()) {
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "Input must have static shape");
-    }
-    
-    auto inputShape = inputType.getShape();
-    if (inputShape.size() != 3) {
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "Expected 3D input tensor [batch, seq_len, hidden_dim]");
-    }
-    
-    int64_t batch_size = inputShape[0];
-    int64_t seq_len_q = inputShape[1];
-    int64_t input_dim = inputShape[2];
-    int64_t seq_len_k = seq_len_q;  // Self-attention
-    
-    // 从QKV权重提取维度
-    auto qkvWeightType = mlir::dyn_cast<RankedTensorType>(qkvWeight.getType());
-    if (!qkvWeightType || !qkvWeightType.hasStaticShape()) {
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "QKV weight must have static shape");
-    }
-    
-    auto qkvWeightShape = qkvWeightType.getShape();
-    if (qkvWeightShape.size() != 2) {
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "QKV weight must be 2D [input_dim, 3*proj_dim]");
-    }
-    
-    int64_t qkv_total_dim = qkvWeightShape[1];
-    int64_t single_proj_dim = qkv_total_dim / 3;
-    
-    // ========== 修改：从Q Reshape操作提取num_heads和head_dim ==========
-    Value qReshapeShape = qReshapeOp.getShape();
-    auto qReshapeShapeAttrOpt = getConstantValue(qReshapeShape);
-    
-    if (!qReshapeShapeAttrOpt.has_value()) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Cannot extract Q Reshape shape constant\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "Q Reshape shape must be constant");
-    }
-    
-    auto qReshapeShapeDense = mlir::dyn_cast<DenseElementsAttr>(qReshapeShapeAttrOpt.value());
-    if (!qReshapeShapeDense) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Q Reshape shape is not dense\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "Q Reshape shape must be dense");
-    }
-    
-    // 提取reshape shape: [batch, seq_len, num_heads, head_dim]
-    auto qReshapeValues = qReshapeShapeDense.getValues<int64_t>();
-    if (qReshapeValues.size() != 4) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: Q Reshape shape is not 4D\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "Q Reshape must be 4D");
-    }
-    
-    int64_t num_heads = *(qReshapeValues.begin() + 2);
-    int64_t head_dim = *(qReshapeValues.begin() + 3);
-    
-    // 验证维度一致性
-    if (single_proj_dim != num_heads * head_dim) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed: single_proj_dim=" << single_proj_dim 
-                 << " != num_heads*head_dim=" << (num_heads * head_dim) << "\n");
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "Projection dimension mismatch");
-    }
-    
-    int64_t per_head_proj_dim = head_dim;  // 单个head的投影维度
-
-    // 从输出投影权重提取输出维度
-    auto outputProjWeightType = mlir::dyn_cast<RankedTensorType>(
-      outputProjWeight.getType());
-    if (!outputProjWeightType || !outputProjWeightType.hasStaticShape()) {
-      return rewriter.notifyMatchFailure(outputProjMatMul, 
-        "Output projection weight must have static shape");
-    }
-    
-    auto outputProjWeightShape = outputProjWeightType.getShape();
-    int64_t output_dim = outputProjWeightShape[1];
-    
-    // ========== 修改：提取scale值 ==========
-    double sm_scaler = 1.0;
-    auto scaleAttrOpt = getConstantValue(scaleValue);
-    if (scaleAttrOpt.has_value()) {
-      if (auto denseAttr = mlir::dyn_cast<DenseElementsAttr>(scaleAttrOpt.value())) {
-        if (denseAttr.isSplat()) {
-          auto splatValue = denseAttr.getSplatValue<APFloat>();
-          sm_scaler = splatValue.convertToDouble();
-        } else if (denseAttr.getNumElements() > 0) {
-          // 如果不是splat，取第一个元素
-          auto values = denseAttr.getValues<APFloat>();
-          sm_scaler = (*values.begin()).convertToDouble();
-        }
-      } else if (auto floatAttr = mlir::dyn_cast<FloatAttr>(scaleAttrOpt.value())) {
-        sm_scaler = floatAttr.getValueAsDouble();
-      }
-    } else {
-      LLVM_DEBUG(llvm::dbgs() << "Warning: Cannot extract scale value, using default 1.0\n");
-    }
-    
-    LLVM_DEBUG(llvm::dbgs() << "MHA dimensions:\n"
+    LLVM_DEBUG(llvm::dbgs() << "MHA parameters:\n"
                << "  batch_size=" << batch_size << "\n"
                << "  num_heads=" << num_heads << "\n"
                << "  seq_len_q=" << seq_len_q << "\n"
                << "  seq_len_k=" << seq_len_k << "\n"
-               << "  input_dim=" << input_dim << "\n"
-               << "  proj_dim=" << single_proj_dim << "\n"
-               << "  head_dim=" << head_dim << "\n"
-               << "  output_dim=" << output_dim << "\n"
+               << "  q_size=" << q_size << "\n"
+               << "  k_size=" << k_size << "\n"
+               << "  v_size=" << v_size << "\n"
+               << "  q_proj_size=" << q_proj_size << "\n"
+               << "  k_proj_size=" << k_proj_size << "\n"
+               << "  v_proj_size=" << v_proj_size << "\n"
+               << "  o_proj_size=" << o_proj_size << "\n"
                << "  sm_scaler=" << sm_scaler << "\n");
     
-    // ========== 调整插入点并合并权重 ==========
-    
-    // 在作用域外声明需要后续使用的变量
-    Value weightsDataPtr;
-    
-    {
-      // 保存当前插入点
-      OpBuilder::InsertionGuard guard(rewriter);
-      
-      // 辅助函数：追溯到原始的定义操作
-      auto findOriginalDefOp = [](Value weight) -> Operation* {
-        Value current = weight;
-        
-        // 如果是 unrealized_conversion_cast，追溯到其输入
-        while (auto castOp = current.getDefiningOp<UnrealizedConversionCastOp>()) {
-          if (castOp.getNumOperands() > 0) {
-            current = castOp.getOperand(0);
-          } else {
-            break;
-          }
-        }
-        
-        return current.getDefiningOp();
-      };
-      
-      // 辅助函数：找到定义操作之后的最后一个相关操作
-      auto findLastOp = [](Operation* defOp) -> Operation* {
-        if (!defOp) return nullptr;
-        
-        // 检查是否有 unrealized_conversion_cast 使用这个定义
-        for (auto user : defOp->getUsers()) {
-          if (isa<UnrealizedConversionCastOp>(user)) {
-            return user;
-          }
-        }
-        return defOp;
-      };
-      
-      // 找到 QKV 权重和输出投影权重的定义
-      Operation* qkvWeightDefOp = findOriginalDefOp(qkvWeight);
-      Operation* outputProjWeightDefOp = findOriginalDefOp(outputProjWeight);
-      Operation* qkvLastOp = findLastOp(qkvWeightDefOp);
-      Operation* outputLastOp = findLastOp(outputProjWeightDefOp);
-      
-      // 找到两个权重定义序列中位置靠后的那个
-      Operation* lastWeightDefOp = nullptr;
-      if (qkvLastOp && outputLastOp) {
-        // 检查它们是否在同一个 block 中
-        if (qkvLastOp->getBlock() == outputLastOp->getBlock()) {
-          lastWeightDefOp = qkvLastOp->isBeforeInBlock(outputLastOp) 
-                            ? outputLastOp : qkvLastOp;
-        } else {
-          LLVM_DEBUG(llvm::dbgs() << "Warning: Weight definitions in different blocks\n");
-          lastWeightDefOp = outputLastOp; // 使用输出权重的位置
-        }
-      } else if (qkvLastOp) {
-        lastWeightDefOp = qkvLastOp;
-      } else if (outputLastOp) {
-        lastWeightDefOp = outputLastOp;
-      }
-      
-      // 设置插入点到权重定义之后
-      if (lastWeightDefOp) {
-        LLVM_DEBUG(llvm::dbgs() << "Setting insertion point after weight definitions\n");
-        rewriter.setInsertionPointAfter(lastWeightDefOp);
-      } else {
-        LLVM_DEBUG(llvm::dbgs() << "Warning: Could not find weight definitions, "
-                                << "using current insertion point\n");
-      }
-      
-      // ========== 在新的插入点合并权重 ==========
-      
-      auto markForBufferization = [&](Value tensor) -> Value {
-        auto tensorType = tensor.getType().cast<RankedTensorType>();
-        auto memrefType = MemRefType::get(
-          tensorType.getShape(),
-          tensorType.getElementType());
-        return rewriter.create<UnrealizedConversionCastOp>(
-          loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
-      };
-      
-      auto getPtr = [&](Value memref) -> Value {
-        auto indexType = rewriter.getIndexType();
-        auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(
-          loc, indexType, memref);
-        auto i64Type = rewriter.getIntegerType(64);
-        auto ptrI64 = rewriter.create<arith::IndexCastOp>(loc, i64Type, ptrIndex);
-        auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-        return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrI64);
-      };
-      
-      auto qkvWeightMemref = markForBufferization(qkvWeight);
-      auto outputProjWeightMemref = markForBufferization(outputProjWeight);
-
-      auto qkvMemrefType = qkvWeightMemref.getType().cast<MemRefType>();
-      auto outputProjMemrefType = outputProjWeightMemref.getType().cast<MemRefType>();
-
-      int64_t qkv_rows = qkvMemrefType.getShape()[0];
-      int64_t qkv_cols = qkvMemrefType.getShape()[1];
-      int64_t output_rows = outputProjMemrefType.getShape()[0];
-      int64_t output_cols = outputProjMemrefType.getShape()[1];
-
-      if (qkv_rows != output_rows) {
-        LLVM_DEBUG(llvm::dbgs() << "Error: QKV weight rows (" << qkv_rows 
-                  << ") != Output weight rows (" << output_rows << ")\n");
-        return rewriter.notifyMatchFailure(outputProjMatMul, 
-          "QKV and output projection weights have incompatible dimensions");
-      }
-
-      int64_t rows = qkv_rows;
-      int64_t total_cols = qkv_cols + output_cols;
-
-      auto combinedWeightType = MemRefType::get(
-        {rows, total_cols}, 
-        qkvMemrefType.getElementType()
-      );
-
-      auto combinedWeightMemref = rewriter.create<memref::AllocOp>(
-        loc, 
-        combinedWeightType,
-        ValueRange{},
-        rewriter.getI64IntegerAttr(16)
-      );
-
-      LLVM_DEBUG(llvm::dbgs() << "Allocated combined weight buffer: " 
-                << rows << "x" << total_cols << "\n");
-
-      // 创建subview
-      SmallVector<OpFoldResult> qkvOffsets = {
-        rewriter.getIndexAttr(0), 
-        rewriter.getIndexAttr(0)
-      };
-      SmallVector<OpFoldResult> qkvSizes = {
-        rewriter.getIndexAttr(rows), 
-        rewriter.getIndexAttr(qkv_cols)
-      };
-      SmallVector<OpFoldResult> qkvStrides = {
-        rewriter.getIndexAttr(1), 
-        rewriter.getIndexAttr(1)
-      };
-
-      auto qkvSubview = rewriter.create<memref::SubViewOp>(
-        loc, combinedWeightMemref, qkvOffsets, qkvSizes, qkvStrides
-      );
-
-      SmallVector<OpFoldResult> outputOffsets = {
-        rewriter.getIndexAttr(0), 
-        rewriter.getIndexAttr(qkv_cols)
-      };
-      SmallVector<OpFoldResult> outputSizes = {
-        rewriter.getIndexAttr(rows), 
-        rewriter.getIndexAttr(output_cols)
-      };
-      SmallVector<OpFoldResult> outputStrides = {
-        rewriter.getIndexAttr(1), 
-        rewriter.getIndexAttr(1)
-      };
-
-      auto outputSubview = rewriter.create<memref::SubViewOp>(
-        loc, combinedWeightMemref, outputOffsets, outputSizes, outputStrides
-      );
-
-      // 异步复制权重
-      auto qkvCopyStream = rewriter.create<gpu::WaitOp>(
-        loc, gpu::AsyncTokenType::get(rewriter.getContext()), ValueRange{}
-      );
-      auto outputCopyStream = rewriter.create<gpu::WaitOp>(
-        loc, gpu::AsyncTokenType::get(rewriter.getContext()), ValueRange{}
-      );
-
-      auto qkvCopyToken = rewriter.create<gpu::MemcpyOp>(
-        loc, 
-        gpu::AsyncTokenType::get(rewriter.getContext()),
-        ValueRange{qkvCopyStream.getAsyncToken()},
-        qkvSubview.getResult(),
-        qkvWeightMemref
-      );
-
-      auto outputCopyToken = rewriter.create<gpu::MemcpyOp>(
-        loc, 
-        gpu::AsyncTokenType::get(rewriter.getContext()),
-        ValueRange{outputCopyStream.getAsyncToken()},
-        outputSubview.getResult(),
-        outputProjWeightMemref
-      );
-
-      SmallVector<Value> weightCopyTokens = {
-        qkvCopyToken.getAsyncToken(), 
-        outputCopyToken.getAsyncToken()
-      };
-      rewriter.create<gpu::WaitOp>(loc, Type{}, weightCopyTokens);
-
-      weightsDataPtr = getPtr(combinedWeightMemref);
-      
-      LLVM_DEBUG(llvm::dbgs() << "Weight merging completed at early insertion point\n");
-      
-    } // InsertionGuard 结束，恢复到原来的插入点
-    
-    // ========== 生成cuDNN调用（在原插入点）==========
+    // ========== 生成cuDNN调用 ==========
     
     auto i32Type = rewriter.getI32Type();
     auto f64Type = rewriter.getF64Type();
     auto ptrType = LLVM::LLVMPointerType::get(rewriter.getContext());
-    auto tokenType = gpu::AsyncTokenType::get(rewriter.getContext());
     
     auto createI32Const = [&](int64_t value) -> Value {
       return rewriter.create<arith::ConstantOp>(
@@ -8977,16 +9240,16 @@ public:
     auto numHeadsValue = createI32Const(num_heads);
     auto seqLenQValue = createI32Const(seq_len_q);
     auto seqLenKValue = createI32Const(seq_len_k);
-    auto qSizeValue = createI32Const(input_dim);
-    auto kSizeValue = createI32Const(input_dim);
-    auto vSizeValue = createI32Const(input_dim);
-    auto qProjSizeValue = createI32Const(per_head_proj_dim);
-    auto kProjSizeValue = createI32Const(per_head_proj_dim);
-    auto vProjSizeValue = createI32Const(per_head_proj_dim);
-    auto oProjSizeValue = createI32Const(output_dim);
+    auto qSizeValue = createI32Const(q_size);
+    auto kSizeValue = createI32Const(k_size);
+    auto vSizeValue = createI32Const(v_size);
+    auto qProjSizeValue = createI32Const(q_proj_size);
+    auto kProjSizeValue = createI32Const(k_proj_size);
+    auto vProjSizeValue = createI32Const(v_proj_size);
+    auto oProjSizeValue = createI32Const(o_proj_size);
     auto smScalerValue = createF64Const(sm_scaler);
     
-    // 准备输入和输出的memref
+    // 辅助函数：将tensor转换为memref
     auto markForBufferization = [&](Value tensor) -> Value {
       auto tensorType = tensor.getType().cast<RankedTensorType>();
       auto memrefType = MemRefType::get(
@@ -8996,6 +9259,7 @@ public:
         loc, TypeRange{memrefType}, ValueRange{tensor}).getResult(0);
     };
     
+    // 辅助函数：从memref获取指针
     auto getPtr = [&](Value memref) -> Value {
       auto indexType = rewriter.getIndexType();
       auto ptrIndex = rewriter.create<memref::ExtractAlignedPointerAsIndexOp>(
@@ -9005,26 +9269,51 @@ public:
       return rewriter.create<LLVM::IntToPtrOp>(loc, ptrType, ptrI64);
     };
     
-    // 输入数据指针
-    auto inputMemref = markForBufferization(originalInput);
-    auto qDataPtr = getPtr(inputMemref);
-    auto kDataPtr = qDataPtr;
-    auto vDataPtr = qDataPtr;
+    // 辅助函数：检查是否是NoValue
+    auto isNoValue = [](Value val) -> bool {
+      if (auto defOp = val.getDefiningOp()) {
+        return defOp->getName().getStringRef() == "onnx.NoValue";
+      }
+      return false;
+    };
+    
+    // 准备输入数据指针
+    auto qMemref = markForBufferization(qInput);
+    auto kMemref = markForBufferization(kInput);
+    auto vMemref = markForBufferization(vInput);
+    auto weightsMemref = markForBufferization(weights);
+    
+    auto qDataPtr = getPtr(qMemref);
+    auto kDataPtr = getPtr(kMemref);
+    auto vDataPtr = getPtr(vMemref);
+    auto weightsDataPtr = getPtr(weightsMemref);
     
     // 分配输出memref
-    auto outputType = mlir::dyn_cast<RankedTensorType>(
-      outputProjMatMul.getResult().getType());
+    auto outputType = mlir::dyn_cast<RankedTensorType>(mhaOp.getResult().getType());
     auto outputMemrefType = MemRefType::get(
       outputType.getShape(), outputType.getElementType());
     auto outputMemref = rewriter.create<memref::AllocOp>(loc, outputMemrefType);
     auto outputDataPtr = getPtr(outputMemref);
     
-    // 创建null指针
+    // 处理注意力窗口参数 - NoValue传递空指针
     MultiDialectBuilder<LLVMBuilder> create(rewriter, loc);
     auto nullPtr = create.llvm.null(ptrType);
     
+    Value loWinIdxPtr = nullPtr;
+    Value hiWinIdxPtr = nullPtr;
+    
+    if (!isNoValue(loWinIdx)) {
+      auto loWinIdxMemref = markForBufferization(loWinIdx);
+      loWinIdxPtr = getPtr(loWinIdxMemref);
+    }
+    
+    if (!isNoValue(hiWinIdx)) {
+      auto hiWinIdxMemref = markForBufferization(hiWinIdx);
+      hiWinIdxPtr = getPtr(hiWinIdxMemref);
+    }
+    
     // 创建CUDA流
-    auto moduleOp = outputProjMatMul->getParentOfType<ModuleOp>();
+    auto moduleOp = mhaOp->getParentOfType<ModuleOp>();
     
     func::FuncOp streamCreateFunc = moduleOp.lookupSymbol<func::FuncOp>("mgpuStreamCreate");
     if (!streamCreateFunc) {
@@ -9063,15 +9352,15 @@ public:
       rewriter.setInsertionPointToStart(moduleOp.getBody());
       
       auto funcType = rewriter.getFunctionType({
-        i32Type, i32Type, i32Type, i32Type,
-        i32Type, i32Type, i32Type,
-        i32Type, i32Type, i32Type, i32Type,
-        f64Type,
-        ptrType, ptrType, ptrType,
-        ptrType,
-        ptrType,
-        ptrType, ptrType,
-        ptrType
+        i32Type, i32Type, i32Type, i32Type,      // batch_size, num_heads, seq_len_q, seq_len_k
+        i32Type, i32Type, i32Type,                // q_size, k_size, v_size
+        i32Type, i32Type, i32Type, i32Type,      // q_proj_size, k_proj_size, v_proj_size, o_proj_size
+        f64Type,                                  // sm_scaler
+        ptrType, ptrType, ptrType,                // q_data, k_data, v_data
+        ptrType,                                  // weights_data
+        ptrType,                                  // output_data
+        ptrType, ptrType,                         // lo_win_idx, hi_win_idx
+        ptrType                                   // stream
       }, {});
       
       funcOp = rewriter.create<func::FuncOp>(loc, functionName, funcType);
@@ -9087,11 +9376,11 @@ public:
       qDataPtr, kDataPtr, vDataPtr,
       weightsDataPtr,
       outputDataPtr,
-      nullPtr, nullPtr,
+      loWinIdxPtr, hiWinIdxPtr,
       streamPtr
     };
     
-    Attribute onnxNodeNameAttr = outputProjMatMul->getAttr("onnx_node_name");
+    Attribute onnxNodeNameAttr = mhaOp->getAttr("onnx_node_name");
     auto callOp = rewriter.create<func::CallOp>(
       loc, TypeRange(), funcOp.getName(), ValueRange(args));
     
@@ -9128,28 +9417,13 @@ public:
     auto resultTensor = rewriter.create<UnrealizedConversionCastOp>(
       loc, TypeRange{outputType}, ValueRange{outputMemref}).getResult(0);
     
-    // 替换输出投影MatMul
-    rewriter.replaceOp(outputProjMatMul, resultTensor);
+    // 替换MHA操作
+    rewriter.replaceOp(mhaOp, resultTensor);
     
-    // 清理中间操作
-    std::vector<Operation*> safeToDelete;
-    for (Operation* op : opsToErase) {
-      if (op && op->getBlock() && op->use_empty()) {
-        safeToDelete.push_back(op);
-      }
-    }
-    
-    for (Operation* op : safeToDelete) {
-      if (op && op->getBlock() && op->use_empty()) {
-        rewriter.eraseOp(op);
-      }
-    }
-    
-    LLVM_DEBUG(llvm::dbgs() << "Successfully converted MHA pattern to cuDNN call\n");
+    LLVM_DEBUG(llvm::dbgs() << "Successfully converted onnx.MHA to cuDNN call\n");
     return success();
   }
 };
-
 
 // Pass to convert ONNX operations to cuDNN calls
 struct ONNXToCuDNNPass
@@ -9193,7 +9467,7 @@ struct ONNXToCuDNNPass
     patterns.add<ReduceMeanOpLowering>(context);
     patterns.add<ReduceSumOpLowering>(context);
     // patterns.add<LayerNormOpLowering>(context, /*benefit=*/3);
-    patterns.add<MultiHeadAttentionOpLowering>(context, /*benefit=*/3);
+    patterns.add<MHAOpLowering>(context);
     
 
     // Apply patterns
@@ -9216,6 +9490,7 @@ struct ONNXToCuDNNPass
     target.addIllegalOp<mlir::ONNXGatherOp>();
     target.addIllegalOp<mlir::ONNXReduceMeanV13Op>();
     target.addIllegalOp<mlir::ONNXReduceSumV11Op>();
+    target.addIllegalOp<mlir::ONNXMHAOp>();
     // target.addIllegalOp<mlir::ONNXSqrtOp>();
     
     if (failed(applyPartialConversion(moduleOp, target, std::move(patterns)))) {
