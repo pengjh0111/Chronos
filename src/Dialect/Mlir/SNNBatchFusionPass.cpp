@@ -471,6 +471,8 @@ private:
       return "Gather";
     } else if (opName == "onnx.Div") {
       return "Div";
+    } else if (opName == "onnx.MHA") {
+      return "MHA";
     }
     
     return "";
@@ -501,6 +503,8 @@ private:
       return "Gather";
     } else if (cleanName.find("Div") != std::string::npos) {
       return "Div";
+    } else if (cleanName.find("MHA") != std::string::npos) {
+      return "MHA";
     }
     
     return cleanName;
@@ -1012,7 +1016,8 @@ private:
            opName == "ReduceMean"||
            opName == "Gather"||
            opName == "Transpose"||
-           opName == "Div";
+           opName == "Div"||
+           opName == "MHA";
   }
   
 
@@ -1057,8 +1062,8 @@ private:
       return fuseMaxPoolOperations(builder, group);
     } else if (group.opType == "MatMul") {
       // 这里处理纯MatMul或者Gemm(bias=0)的融合
-      // return fuseMixedMatMulOperations(builder, group); //gemm 与 matmul混合的情况
       return fuseMatMulOperations(builder, group);
+      // return true;
     } else if (group.opType == "Gemm") {
       // 这里处理有非零bias的Gemm融合
       return fuseGemmOperations(builder, group);
@@ -1072,12 +1077,536 @@ private:
       return true;
     } else if (group.opType == "Div") {
       return true;
+    } else if (group.opType == "MHA") {
+      return fuseMHAOperations(builder, group);
     }
     
     LLVM_DEBUG(llvm::dbgs() << "Unknown operation type for fusion: " << group.opType << "\n");
     return false;
   }
   
+  // 融合MHA操作 - 并行复制版本，权重显式拼接
+  bool fuseMHAOperations(OpBuilder& builder, FusibleGroup& group) {
+    LLVM_DEBUG(llvm::dbgs() << "Fusing " << group.operations.size() << " MHA operations with parallel copying and explicit weight concatenation\n");
+    
+    Operation* firstOp = group.operations[0];
+    auto firstMHA = dyn_cast<mlir::ONNXMHAOp>(firstOp);
+    if (!firstMHA) {
+      LLVM_DEBUG(llvm::dbgs() << "First operation is not a MHA op\n");
+      return false;
+    }
+    
+    // MHA输入: Q, K, V, weights, bias_k, bias_v
+    // 输出: tensor<8x256x256xf32>
+    auto qType = firstMHA.getQ().getType().cast<RankedTensorType>();
+    auto weightsType = firstMHA.getWeights().getType().cast<RankedTensorType>();
+    auto outputType = firstMHA.getResult().getType().cast<RankedTensorType>();
+    
+    ArrayRef<int64_t> qShape = qType.getShape();  // [8, 256, 256]
+    ArrayRef<int64_t> weightsShape = weightsType.getShape();  // [256, 1024]
+    ArrayRef<int64_t> outputShape = outputType.getShape();  // [8, 256, 256]
+    
+    LLVM_DEBUG(llvm::dbgs() << "Original shapes: Q/K/V=[" << qShape[0] << "," << qShape[1] << "," << qShape[2] << "], ");
+    LLVM_DEBUG(llvm::dbgs() << "Weights=[" << weightsShape[0] << "," << weightsShape[1] << "], ");
+    LLVM_DEBUG(llvm::dbgs() << "Output=[" << outputShape[0] << "," << outputShape[1] << "," << outputShape[2] << "]\n");
+    
+    // 验证所有操作具有相同的形状
+    for (size_t i = 1; i < group.operations.size(); ++i) {
+      auto currentMHA = dyn_cast<mlir::ONNXMHAOp>(group.operations[i]);
+      if (!currentMHA) {
+        LLVM_DEBUG(llvm::dbgs() << "Operation " << i << " is not a MHA op\n");
+        return false;
+      }
+      
+      auto currentQShape = currentMHA.getQ().getType().cast<RankedTensorType>().getShape();
+      if (currentQShape != qShape) {
+        LLVM_DEBUG(llvm::dbgs() << "MHA operations have different shapes, cannot fuse\n");
+        return false;
+      }
+    }
+    
+    // ========== 阶段1：处理权重的显式拼接（特殊处理）==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 1: Processing explicit weight concatenation\n");
+    
+    // 获取第一个MHA的权重，找到对应的Concat操作
+    Value weightsValue = firstMHA.getWeights();
+    Operation* concatOp = weightsValue.getDefiningOp();
+    
+    Value concatenatedWeights;
+    if (concatOp && isa<mlir::ONNXConcatOp>(concatOp)) {
+      auto concat = dyn_cast<mlir::ONNXConcatOp>(concatOp);
+      LLVM_DEBUG(llvm::dbgs() << "Found Concat operation for weights\n");
+      
+      // 获取Concat的两个源操作数
+      SmallVector<Value> concatInputs;
+      for (Value input : concat.getInputs()) {
+        concatInputs.push_back(input);
+      }
+      
+      if (concatInputs.size() != 2) {
+        LLVM_DEBUG(llvm::dbgs() << "Expected 2 inputs to Concat, got " << concatInputs.size() << "\n");
+        return false;
+      }
+      
+      Value weight1 = concatInputs[0];  // [256, 768]
+      Value weight2 = concatInputs[1];  // [256, 256]
+      
+      auto weight1Type = weight1.getType().cast<RankedTensorType>();
+      auto weight2Type = weight2.getType().cast<RankedTensorType>();
+      ArrayRef<int64_t> weight1Shape = weight1Type.getShape();
+      ArrayRef<int64_t> weight2Shape = weight2Type.getShape();
+      
+      LLVM_DEBUG(llvm::dbgs() << "Weight1 shape: [" << weight1Shape[0] << "," << weight1Shape[1] << "]\n");
+      LLVM_DEBUG(llvm::dbgs() << "Weight2 shape: [" << weight2Shape[0] << "," << weight2Shape[1] << "]\n");
+      
+      // 在常量声明之后插入权重拼接操作
+      Operation* insertionPoint = findInsertionPointAfterConstants(firstOp->getParentOp());
+      OpBuilder::InsertionGuard guard(builder);
+      builder.setInsertionPointAfter(insertionPoint);
+      
+      // 分配拼接后的权重内存
+      auto concatenatedWeightsMemRefType = MemRefType::get(weightsShape, weightsType.getElementType());
+      Value concatenatedWeightsMemRef = builder.create<memref::AllocOp>(
+          builder.getUnknownLoc(), concatenatedWeightsMemRefType, 
+          ValueRange{}, builder.getI64IntegerAttr(16));
+      
+      // 创建subview用于第一个权重 [256, 768]
+      SmallVector<OpFoldResult> weight1Offsets = {
+          builder.getI64IntegerAttr(0),
+          builder.getI64IntegerAttr(0)
+      };
+      SmallVector<OpFoldResult> weight1Sizes = {
+          builder.getI64IntegerAttr(weight1Shape[0]),
+          builder.getI64IntegerAttr(weight1Shape[1])
+      };
+      SmallVector<OpFoldResult> weight1Strides = {
+          builder.getI64IntegerAttr(1),
+          builder.getI64IntegerAttr(1)
+      };
+      
+      Value weight1View = builder.create<memref::SubViewOp>(
+          builder.getUnknownLoc(), concatenatedWeightsMemRef, 
+          weight1Offsets, weight1Sizes, weight1Strides);
+      
+      // 创建subview用于第二个权重 [256, 256]，在第二维偏移768
+      SmallVector<OpFoldResult> weight2Offsets = {
+          builder.getI64IntegerAttr(0),
+          builder.getI64IntegerAttr(weight1Shape[1])  // 偏移量为768
+      };
+      SmallVector<OpFoldResult> weight2Sizes = {
+          builder.getI64IntegerAttr(weight2Shape[0]),
+          builder.getI64IntegerAttr(weight2Shape[1])
+      };
+      SmallVector<OpFoldResult> weight2Strides = {
+          builder.getI64IntegerAttr(1),
+          builder.getI64IntegerAttr(1)
+      };
+      
+      Value weight2View = builder.create<memref::SubViewOp>(
+          builder.getUnknownLoc(), concatenatedWeightsMemRef, 
+          weight2Offsets, weight2Sizes, weight2Strides);
+      
+      // 类型转换
+      auto weight1MemRefType = MemRefType::get(weight1Shape, weight1Type.getElementType());
+      auto weight2MemRefType = MemRefType::get(weight2Shape, weight2Type.getElementType());
+      
+      Value weight1MemRef = builder.create<mlir::UnrealizedConversionCastOp>(
+          builder.getUnknownLoc(), weight1MemRefType, weight1).getResult(0);
+      Value weight2MemRef = builder.create<mlir::UnrealizedConversionCastOp>(
+          builder.getUnknownLoc(), weight2MemRefType, weight2).getResult(0);
+      
+      // 创建独立的异步流并并行复制两个权重
+      auto weight1CopyStream = builder.create<gpu::WaitOp>(builder.getUnknownLoc(), 
+          gpu::AsyncTokenType::get(builder.getContext()), ValueRange());
+      auto weight2CopyStream = builder.create<gpu::WaitOp>(builder.getUnknownLoc(), 
+          gpu::AsyncTokenType::get(builder.getContext()), ValueRange());
+      
+      auto weight1CopyToken = builder.create<gpu::MemcpyOp>(
+          builder.getUnknownLoc(), 
+          gpu::AsyncTokenType::get(builder.getContext()),
+          ValueRange(weight1CopyStream.getAsyncToken()),
+          weight1View, weight1MemRef);
+      
+      auto weight2CopyToken = builder.create<gpu::MemcpyOp>(
+          builder.getUnknownLoc(), 
+          gpu::AsyncTokenType::get(builder.getContext()),
+          ValueRange(weight2CopyStream.getAsyncToken()),
+          weight2View, weight2MemRef);
+      
+      // 等待两个权重复制完成
+      SmallVector<Value> weightCopyTokens = {
+          weight1CopyToken.getAsyncToken(), 
+          weight2CopyToken.getAsyncToken()
+      };
+      builder.create<gpu::WaitOp>(builder.getUnknownLoc(), Type{}, weightCopyTokens);
+      
+      LLVM_DEBUG(llvm::dbgs() << "Completed explicit weight concatenation with parallel copying\n");
+      
+      // 转换回tensor
+      concatenatedWeights = builder.create<mlir::UnrealizedConversionCastOp>(
+          builder.getUnknownLoc(), weightsType, concatenatedWeightsMemRef).getResult(0);
+      
+    } else {
+      // 如果没有Concat操作，直接使用原始权重
+      LLVM_DEBUG(llvm::dbgs() << "No Concat operation found, using original weights\n");
+      concatenatedWeights = weightsValue;
+    }
+    
+    // 恢复插入点到融合操作的位置
+    builder.setInsertionPointAfter(group.operations.back());
+    
+    // ========== 阶段2：检测Q/K/V是否共享输入（优化） ==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 2: Detecting Q/K/V input sharing\n");
+    
+    // 检查是否所有操作都使用相同的Q/K/V输入（self-attention情况）
+    bool isSelfAttention = true;
+    for (size_t i = 0; i < group.operations.size(); ++i) {
+      auto mha = dyn_cast<mlir::ONNXMHAOp>(group.operations[i]);
+      if (mha.getQ() != mha.getK() || mha.getK() != mha.getV()) {
+        isSelfAttention = false;
+        break;
+      }
+    }
+    
+    if (isSelfAttention) {
+      LLVM_DEBUG(llvm::dbgs() << "Detected self-attention pattern: Q=K=V for all operations\n");
+      LLVM_DEBUG(llvm::dbgs() << "Optimization: will only allocate and copy Q once, share for K and V\n");
+    } else {
+      LLVM_DEBUG(llvm::dbgs() << "Cross-attention pattern detected: Q/K/V are different, need separate handling\n");
+    }
+    
+    // ========== 阶段3：计算融合后的形状 ==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 3: Computing fused shapes\n");
+    
+    int64_t originalBatchSize = qShape[0];
+    int64_t fusedBatchSize = originalBatchSize * group.operations.size();
+    
+    SmallVector<int64_t> fusedQShape = {fusedBatchSize, qShape[1], qShape[2]};
+    SmallVector<int64_t> fusedOutputShape = {fusedBatchSize, outputShape[1], outputShape[2]};
+    
+    auto fusedQType = RankedTensorType::get(fusedQShape, qType.getElementType());
+    auto fusedOutputType = RankedTensorType::get(fusedOutputShape, outputType.getElementType());
+    
+    auto qMemRefType = MemRefType::get(fusedQShape, qType.getElementType());
+    auto outputMemRefType = MemRefType::get(fusedOutputShape, outputType.getElementType());
+    auto originalQMemRefType = MemRefType::get(qShape, qType.getElementType());
+    auto originalOutputMemRefType = MemRefType::get(outputShape, outputType.getElementType());
+    
+    LLVM_DEBUG(llvm::dbgs() << "Fused batch size: " << originalBatchSize << " * " << group.operations.size() 
+              << " = " << fusedBatchSize << "\n");
+    LLVM_DEBUG(llvm::dbgs() << "Fused shapes: Q/K/V=[" << fusedQShape[0] << "," << fusedQShape[1] << "," << fusedQShape[2] << "], ");
+    LLVM_DEBUG(llvm::dbgs() << "Output=[" << fusedOutputShape[0] << "," << fusedOutputShape[1] << "," << fusedOutputShape[2] << "]\n");
+    
+    // ========== 阶段4：分配GPU内存（根据是否self-attention优化）==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 4: Allocating GPU memory\n");
+    
+    Value batchedQ, batchedK, batchedV;
+    
+    if (isSelfAttention) {
+      // 优化：只分配一份内存，K和V共享Q的内存
+      batchedQ = builder.create<memref::AllocOp>(
+          builder.getUnknownLoc(), qMemRefType, 
+          ValueRange{}, builder.getI64IntegerAttr(16));
+      batchedK = batchedQ;  // K和V直接使用Q的内存
+      batchedV = batchedQ;
+      LLVM_DEBUG(llvm::dbgs() << "Optimization: allocated single shared memory for Q/K/V\n");
+    } else {
+      // 正常情况：分配三份独立的内存
+      batchedQ = builder.create<memref::AllocOp>(
+          builder.getUnknownLoc(), qMemRefType, 
+          ValueRange{}, builder.getI64IntegerAttr(16));
+      
+      batchedK = builder.create<memref::AllocOp>(
+          builder.getUnknownLoc(), qMemRefType, 
+          ValueRange{}, builder.getI64IntegerAttr(16));
+      
+      batchedV = builder.create<memref::AllocOp>(
+          builder.getUnknownLoc(), qMemRefType, 
+          ValueRange{}, builder.getI64IntegerAttr(16));
+      LLVM_DEBUG(llvm::dbgs() << "Allocated separate memory for Q, K, and V\n");
+    }
+    
+    Value batchedOutput = builder.create<memref::AllocOp>(
+        builder.getUnknownLoc(), outputMemRefType, 
+        ValueRange{}, builder.getI64IntegerAttr(16));
+    
+    // 为每个原始操作分配独立的输出内存
+    SmallVector<Value> individualOutputs;
+    for (size_t i = 0; i < group.operations.size(); ++i) {
+      Value individualOutput = builder.create<memref::AllocOp>(
+          builder.getUnknownLoc(), originalOutputMemRefType, 
+          ValueRange{}, builder.getI64IntegerAttr(16));
+      individualOutputs.push_back(individualOutput);
+    }
+    
+    LLVM_DEBUG(llvm::dbgs() << "Allocated GPU memory for batched inputs and outputs\n");
+    
+    // ========== 阶段5：创建subviews（根据是否self-attention优化）==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 5: Creating subviews\n");
+    
+    SmallVector<Value> qViews, kViews, vViews, outputViews;
+    
+    for (size_t i = 0; i < group.operations.size(); ++i) {
+      int64_t offset = i * originalBatchSize;
+      
+      SmallVector<OpFoldResult> offsets = {
+          builder.getI64IntegerAttr(offset),
+          builder.getI64IntegerAttr(0),
+          builder.getI64IntegerAttr(0)
+      };
+      SmallVector<OpFoldResult> sizes = {
+          builder.getI64IntegerAttr(originalBatchSize),
+          builder.getI64IntegerAttr(qShape[1]),
+          builder.getI64IntegerAttr(qShape[2])
+      };
+      SmallVector<OpFoldResult> strides = {
+          builder.getI64IntegerAttr(1),
+          builder.getI64IntegerAttr(1),
+          builder.getI64IntegerAttr(1)
+      };
+      
+      Value qView = builder.create<memref::SubViewOp>(
+          builder.getUnknownLoc(), batchedQ, offsets, sizes, strides);
+      qViews.push_back(qView);
+      
+      if (isSelfAttention) {
+        // 优化：K和V直接使用Q的view
+        kViews.push_back(qView);
+        vViews.push_back(qView);
+      } else {
+        // 正常情况：为K和V创建独立的view
+        Value kView = builder.create<memref::SubViewOp>(
+            builder.getUnknownLoc(), batchedK, offsets, sizes, strides);
+        kViews.push_back(kView);
+        
+        Value vView = builder.create<memref::SubViewOp>(
+            builder.getUnknownLoc(), batchedV, offsets, sizes, strides);
+        vViews.push_back(vView);
+      }
+      
+      Value outputView = builder.create<memref::SubViewOp>(
+          builder.getUnknownLoc(), batchedOutput, offsets, sizes, strides);
+      outputViews.push_back(outputView);
+      
+      if (isSelfAttention) {
+        LLVM_DEBUG(llvm::dbgs() << "Created shared subview for Q/K/V of operation " << i << "\n");
+      } else {
+        LLVM_DEBUG(llvm::dbgs() << "Created separate subviews for Q/K/V of operation " << i << "\n");
+      }
+    }
+    
+    // ========== 阶段6：并行复制输入数据（根据是否self-attention优化）==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 6: Performing parallel input copies\n");
+    
+    SmallVector<Value> inputCopyTokens;
+    
+    if (isSelfAttention) {
+      // 优化：只复制Q一次，K和V自动共享
+      LLVM_DEBUG(llvm::dbgs() << "Optimization: copying Q only once (K and V share the same data)\n");
+      
+      SmallVector<Value> qCopyStreams;
+      for (size_t i = 0; i < group.operations.size(); ++i) {
+        auto qStream = builder.create<gpu::WaitOp>(builder.getUnknownLoc(), 
+            gpu::AsyncTokenType::get(builder.getContext()), ValueRange());
+        qCopyStreams.push_back(qStream.getAsyncToken());
+      }
+      
+      for (size_t i = 0; i < group.operations.size(); ++i) {
+        auto currentMHA = dyn_cast<mlir::ONNXMHAOp>(group.operations[i]);
+        
+        Value qMemRef = builder.create<mlir::UnrealizedConversionCastOp>(
+            builder.getUnknownLoc(), originalQMemRefType, currentMHA.getQ()).getResult(0);
+        
+        auto qCopyToken = builder.create<gpu::MemcpyOp>(
+            builder.getUnknownLoc(), 
+            gpu::AsyncTokenType::get(builder.getContext()),
+            ValueRange(qCopyStreams[i]),
+            qViews[i], qMemRef);
+        inputCopyTokens.push_back(qCopyToken.getAsyncToken());
+        
+        LLVM_DEBUG(llvm::dbgs() << "Initiated Q copy for MHA operation " << i << " (K and V will share)\n");
+      }
+      
+    } else {
+      // 正常情况：分别复制Q、K、V
+      LLVM_DEBUG(llvm::dbgs() << "Copying Q, K, V separately for cross-attention\n");
+      
+      SmallVector<Value> qCopyStreams, kCopyStreams, vCopyStreams;
+      for (size_t i = 0; i < group.operations.size(); ++i) {
+        auto qStream = builder.create<gpu::WaitOp>(builder.getUnknownLoc(), 
+            gpu::AsyncTokenType::get(builder.getContext()), ValueRange());
+        qCopyStreams.push_back(qStream.getAsyncToken());
+        
+        auto kStream = builder.create<gpu::WaitOp>(builder.getUnknownLoc(), 
+            gpu::AsyncTokenType::get(builder.getContext()), ValueRange());
+        kCopyStreams.push_back(kStream.getAsyncToken());
+        
+        auto vStream = builder.create<gpu::WaitOp>(builder.getUnknownLoc(), 
+            gpu::AsyncTokenType::get(builder.getContext()), ValueRange());
+        vCopyStreams.push_back(vStream.getAsyncToken());
+      }
+      
+      for (size_t i = 0; i < group.operations.size(); ++i) {
+        auto currentMHA = dyn_cast<mlir::ONNXMHAOp>(group.operations[i]);
+        
+        Value qMemRef = builder.create<mlir::UnrealizedConversionCastOp>(
+            builder.getUnknownLoc(), originalQMemRefType, currentMHA.getQ()).getResult(0);
+        Value kMemRef = builder.create<mlir::UnrealizedConversionCastOp>(
+            builder.getUnknownLoc(), originalQMemRefType, currentMHA.getK()).getResult(0);
+        Value vMemRef = builder.create<mlir::UnrealizedConversionCastOp>(
+            builder.getUnknownLoc(), originalQMemRefType, currentMHA.getV()).getResult(0);
+        
+        auto qCopyToken = builder.create<gpu::MemcpyOp>(
+            builder.getUnknownLoc(), 
+            gpu::AsyncTokenType::get(builder.getContext()),
+            ValueRange(qCopyStreams[i]),
+            qViews[i], qMemRef);
+        inputCopyTokens.push_back(qCopyToken.getAsyncToken());
+        
+        auto kCopyToken = builder.create<gpu::MemcpyOp>(
+            builder.getUnknownLoc(), 
+            gpu::AsyncTokenType::get(builder.getContext()),
+            ValueRange(kCopyStreams[i]),
+            kViews[i], kMemRef);
+        inputCopyTokens.push_back(kCopyToken.getAsyncToken());
+        
+        auto vCopyToken = builder.create<gpu::MemcpyOp>(
+            builder.getUnknownLoc(), 
+            gpu::AsyncTokenType::get(builder.getContext()),
+            ValueRange(vCopyStreams[i]),
+            vViews[i], vMemRef);
+        inputCopyTokens.push_back(vCopyToken.getAsyncToken());
+        
+        LLVM_DEBUG(llvm::dbgs() << "Initiated Q/K/V copies for MHA operation " << i << "\n");
+      }
+    }
+    
+    builder.create<gpu::WaitOp>(builder.getUnknownLoc(), Type{}, inputCopyTokens);
+    
+    if (isSelfAttention) {
+      LLVM_DEBUG(llvm::dbgs() << "All input copies completed (" << inputCopyTokens.size() 
+                << " streams, 3x reduction from " << (inputCopyTokens.size() * 3) << ")\n");
+    } else {
+      LLVM_DEBUG(llvm::dbgs() << "All input copies completed (" << inputCopyTokens.size() << " streams)\n");
+    }
+    
+    // ========== 阶段7：执行融合计算 ==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 7: Performing fused computation\n");
+    
+    Value batchedQTensor = builder.create<mlir::UnrealizedConversionCastOp>(
+        builder.getUnknownLoc(), fusedQType, batchedQ).getResult(0);
+    Value batchedKTensor = builder.create<mlir::UnrealizedConversionCastOp>(
+        builder.getUnknownLoc(), fusedQType, batchedK).getResult(0);
+    Value batchedVTensor = builder.create<mlir::UnrealizedConversionCastOp>(
+        builder.getUnknownLoc(), fusedQType, batchedV).getResult(0);
+    
+    // 创建融合的MHA操作
+    // 首先获取原始操作的属性值
+    int64_t numHeads = firstMHA.getNumHeads();
+    int64_t qProjSize = firstMHA.getQProjSize();
+    int64_t kProjSize = firstMHA.getKProjSize();
+    int64_t vProjSize = firstMHA.getVProjSize();
+    int64_t oProjSize = firstMHA.getOProjSize();
+    llvm::APFloat smScaler = firstMHA.getSmScaler();
+    
+    // 获取lo_win_idx和hi_win_idx（通常是none类型）
+    Value loWinIdx = firstMHA.getLoWinIdx();
+    Value hiWinIdx = firstMHA.getHiWinIdx();
+    
+    // 使用builder.create的第三个重载版本（直接传递int64_t和APFloat）
+    Value fusedResult = builder.create<mlir::ONNXMHAOp>(
+        builder.getUnknownLoc(),
+        fusedOutputType,
+        batchedQTensor,
+        batchedKTensor,
+        batchedVTensor,
+        concatenatedWeights,  // 使用显式拼接的权重
+        loWinIdx,
+        hiWinIdx,
+        numHeads,
+        qProjSize,
+        kProjSize,
+        vProjSize,
+        oProjSize,
+        smScaler);
+    
+    Value fusedResultMemRef = builder.create<mlir::UnrealizedConversionCastOp>(
+        builder.getUnknownLoc(), outputMemRefType, fusedResult).getResult(0);
+    
+    LLVM_DEBUG(llvm::dbgs() << "Created fused MHA operation with explicit weight concatenation\n");
+    
+    // 将融合结果复制到batched output memory
+    auto fusedCopyStream = builder.create<gpu::WaitOp>(builder.getUnknownLoc(), 
+        gpu::AsyncTokenType::get(builder.getContext()), ValueRange());
+    auto fusedCopyToken = builder.create<gpu::MemcpyOp>(
+        builder.getUnknownLoc(), 
+        gpu::AsyncTokenType::get(builder.getContext()),
+        ValueRange(fusedCopyStream.getAsyncToken()),
+        batchedOutput, fusedResultMemRef);
+    builder.create<gpu::WaitOp>(builder.getUnknownLoc(), Type{}, ValueRange(fusedCopyToken.getAsyncToken()));
+    
+    LLVM_DEBUG(llvm::dbgs() << "Copied fused MHA result to batched output memory\n");
+    
+    // ========== 阶段8：并行输出复制 ==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 8: Performing parallel output copies\n");
+    
+    SmallVector<Value> outputCopyStreams;
+    for (size_t i = 0; i < group.operations.size(); ++i) {
+      auto copyStream = builder.create<gpu::WaitOp>(builder.getUnknownLoc(), 
+          gpu::AsyncTokenType::get(builder.getContext()), ValueRange());
+      outputCopyStreams.push_back(copyStream.getAsyncToken());
+    }
+    
+    SmallVector<Value> outputCopyTokens;
+    for (size_t i = 0; i < group.operations.size(); ++i) {
+      auto copyToken = builder.create<gpu::MemcpyOp>(
+          builder.getUnknownLoc(), 
+          gpu::AsyncTokenType::get(builder.getContext()),
+          ValueRange(outputCopyStreams[i]),
+          individualOutputs[i], outputViews[i]);
+      outputCopyTokens.push_back(copyToken.getAsyncToken());
+    }
+    
+    builder.create<gpu::WaitOp>(builder.getUnknownLoc(), Type{}, outputCopyTokens);
+    LLVM_DEBUG(llvm::dbgs() << "All parallel output copies completed\n");
+    
+    // ========== 阶段9：结果替换和清理 ==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 9: Result replacement and cleanup\n");
+    
+    SmallVector<Value> splitResults;
+    for (size_t i = 0; i < group.operations.size(); ++i) {
+      Value splitResult = builder.create<mlir::UnrealizedConversionCastOp>(
+          builder.getUnknownLoc(), outputType, individualOutputs[i]).getResult(0);
+      splitResults.push_back(splitResult);
+    }
+    
+    // 先替换所有使用
+    for (size_t i = 0; i < group.operations.size(); ++i) {
+      Operation* op = group.operations[i];
+      op->getResult(0).replaceAllUsesWith(splitResults[i]);
+      LLVM_DEBUG(llvm::dbgs() << "Replaced MHA operation " << i << " result\n");
+    }
+    
+    // 然后删除操作
+    for (size_t i = 0; i < group.operations.size(); ++i) {
+      Operation* op = group.operations[i];
+      LLVM_DEBUG(llvm::dbgs() << "Erasing MHA operation " << i << "\n");
+      op->erase();
+    }
+    
+    LLVM_DEBUG(llvm::dbgs() << "Successfully fused " << group.operations.size() 
+              << " MHA operations with explicit weight concatenation and parallel copying\n");
+    
+    if (isSelfAttention) {
+      size_t streamsSaved = group.operations.size() * 2;  // 节省了K和V的复制
+      LLVM_DEBUG(llvm::dbgs() << "Self-attention optimization: saved " << streamsSaved 
+                << " redundant copy operations (Q=K=V)\n");
+      LLVM_DEBUG(llvm::dbgs() << "Memory optimization: allocated 1 buffer instead of 3 for Q/K/V\n");
+    }
+    
+    return true;
+  }
+
   // 融合Transpose操作 - 并行复制版本
   bool fuseTransposeOperations(OpBuilder& builder, FusibleGroup& group) {
     LLVM_DEBUG(llvm::dbgs() << "Fusing " << group.operations.size() << " Transpose operations with parallel copying\n");
@@ -2371,8 +2900,358 @@ private:
 
   }
 
-  // 专门处理batch matmul的融合函数 - 增加权重去重优化
+  // 专门处理batch matmul的融合函数 - 优化权重处理
   bool fuseBatchMatMulOperations(OpBuilder& builder, FusibleGroup& group) {
+    LLVM_DEBUG(llvm::dbgs() << "Fusing " << group.operations.size() << " Batch MatMul operations with optimized weight handling\n");
+    
+    Operation* firstOp = group.operations[0];
+    auto firstMatMul = dyn_cast<mlir::ONNXMatMulOp>(firstOp);
+    if (!firstMatMul) {
+      return false;
+    }
+    
+    auto aType = firstMatMul.getA().getType().cast<RankedTensorType>();
+    auto bType = firstMatMul.getB().getType().cast<RankedTensorType>();
+    auto outputType = firstMatMul.getY().getType().cast<RankedTensorType>();
+    
+    ArrayRef<int64_t> aShape = aType.getShape();
+    ArrayRef<int64_t> bShape = bType.getShape();
+    ArrayRef<int64_t> outputShape = outputType.getShape();
+    
+    LLVM_DEBUG(llvm::dbgs() << "Original shapes: A=[");
+    for (size_t i = 0; i < aShape.size(); ++i) {
+      LLVM_DEBUG(llvm::dbgs() << aShape[i]);
+      if (i < aShape.size() - 1) LLVM_DEBUG(llvm::dbgs() << ",");
+    }
+    LLVM_DEBUG(llvm::dbgs() << "], B=[");
+    for (size_t i = 0; i < bShape.size(); ++i) {
+      LLVM_DEBUG(llvm::dbgs() << bShape[i]);
+      if (i < bShape.size() - 1) LLVM_DEBUG(llvm::dbgs() << ",");
+    }
+    LLVM_DEBUG(llvm::dbgs() << "], Output=[");
+    for (size_t i = 0; i < outputShape.size(); ++i) {
+      LLVM_DEBUG(llvm::dbgs() << outputShape[i]);
+      if (i < outputShape.size() - 1) LLVM_DEBUG(llvm::dbgs() << ",");
+    }
+    LLVM_DEBUG(llvm::dbgs() << "]\n");
+    
+    // 确定广播情况和参数
+    bool needsBroadcastA = (aShape.size() == 2 && bShape.size() == 3);
+    bool needsBroadcastB = (aShape.size() == 3 && bShape.size() == 2);
+    
+    if (!needsBroadcastA && !needsBroadcastB) {
+      LLVM_DEBUG(llvm::dbgs() << "Error: Expected batch matmul case but shapes don't match\n");
+      return false;
+    }
+    
+    // ========== 阶段1：分析权重共享情况 ==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 1: Analyzing weight sharing\n");
+    
+    bool hasSharedWeights = false;
+    Value sharedWeight;
+    
+    if (needsBroadcastB) {
+      // 3D x 2D情况：B是权重，检查是否所有操作共享相同的B
+      hasSharedWeights = true;
+      sharedWeight = firstMatMul.getB();
+      
+      for (size_t i = 1; i < group.operations.size(); ++i) {
+        auto currentMatMul = dyn_cast<mlir::ONNXMatMulOp>(group.operations[i]);
+        if (currentMatMul.getB() != sharedWeight) {
+          hasSharedWeights = false;
+          break;
+        }
+      }
+      
+      if (hasSharedWeights) {
+        LLVM_DEBUG(llvm::dbgs() << "Detected shared weight (B matrix) across all " 
+                  << group.operations.size() << " operations - will NOT broadcast or batch weights\n");
+      }
+    } else if (needsBroadcastA) {
+      // 2D x 3D情况：A是权重，检查是否所有操作共享相同的A
+      hasSharedWeights = true;
+      sharedWeight = firstMatMul.getA();
+      
+      for (size_t i = 1; i < group.operations.size(); ++i) {
+        auto currentMatMul = dyn_cast<mlir::ONNXMatMulOp>(group.operations[i]);
+        if (currentMatMul.getA() != sharedWeight) {
+          hasSharedWeights = false;
+          break;
+        }
+      }
+      
+      if (hasSharedWeights) {
+        LLVM_DEBUG(llvm::dbgs() << "Detected shared weight (A matrix) across all " 
+                  << group.operations.size() << " operations - will NOT broadcast or batch weights\n");
+      }
+    }
+    
+    // 计算batch维度和融合后的形状
+    int64_t batchDim = 0;
+    SmallVector<int64_t> fusedActivationShape;
+    SmallVector<int64_t> fusedOutputShape;
+    
+    if (needsBroadcastB && hasSharedWeights) {
+      // 3D x 2D，权重共享：只拼接A（激活）
+      batchDim = aShape[0];
+      int64_t fusedBatchSize = batchDim * group.operations.size();
+      fusedActivationShape = {fusedBatchSize, aShape[1], aShape[2]};
+      fusedOutputShape = {fusedBatchSize, outputShape[1], outputShape[2]};
+      
+      LLVM_DEBUG(llvm::dbgs() << "Fusion plan: Batched A (" << fusedActivationShape[0] << "x" 
+                << fusedActivationShape[1] << "x" << fusedActivationShape[2] << ") x Shared Weight B (" 
+                << bShape[0] << "x" << bShape[1] << ")\n");
+      
+    } else if (needsBroadcastA && hasSharedWeights) {
+      // 2D x 3D，权重共享：只拼接B（激活）
+      batchDim = bShape[0];
+      int64_t fusedBatchSize = batchDim * group.operations.size();
+      fusedActivationShape = {fusedBatchSize, bShape[1], bShape[2]};
+      fusedOutputShape = {fusedBatchSize, outputShape[1], outputShape[2]};
+      
+      LLVM_DEBUG(llvm::dbgs() << "Fusion plan: Shared Weight A (" << aShape[0] << "x" 
+                << aShape[1] << ") x Batched B (" << fusedActivationShape[0] << "x" 
+                << fusedActivationShape[1] << "x" << fusedActivationShape[2] << ")\n");
+      
+    } else {
+      // 权重不共享的情况：回退到原来的逻辑（广播并拼接所有矩阵）
+      LLVM_DEBUG(llvm::dbgs() << "Weights are not shared - falling back to full broadcast and batching\n");
+      return fuseBatchMatMulOperationsWithFullBatching(builder, group);
+    }
+    
+    // ========== 阶段2：分配GPU内存 ==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 2: Allocating GPU memory\n");
+    
+    auto activationType = needsBroadcastB ? aType : bType;
+    auto fusedActivationType = RankedTensorType::get(fusedActivationShape, activationType.getElementType());
+    auto fusedOutputType = RankedTensorType::get(fusedOutputShape, outputType.getElementType());
+    
+    auto activationMemRefType = MemRefType::get(fusedActivationShape, activationType.getElementType());
+    auto outputMemRefType = MemRefType::get(fusedOutputShape, outputType.getElementType());
+    auto originalOutputMemRefType = MemRefType::get(outputShape, outputType.getElementType());
+    
+    // 单个激活的shape（用于subview）
+    SmallVector<int64_t> singleActivationShape;
+    if (needsBroadcastB) {
+      singleActivationShape = {aShape[0], aShape[1], aShape[2]};
+    } else {
+      singleActivationShape = {bShape[0], bShape[1], bShape[2]};
+    }
+    auto singleActivationMemRefType = MemRefType::get(singleActivationShape, activationType.getElementType());
+    
+    // 分配batched activation memory
+    Value batchedActivation = builder.create<memref::AllocOp>(
+        builder.getUnknownLoc(), activationMemRefType, 
+        ValueRange{}, builder.getI64IntegerAttr(16));
+    
+    // 分配batched output memory
+    Value batchedOutput = builder.create<memref::AllocOp>(
+        builder.getUnknownLoc(), outputMemRefType, 
+        ValueRange{}, builder.getI64IntegerAttr(16));
+    
+    // 为每个原始操作分配独立的输出内存
+    SmallVector<Value> individualOutputs;
+    for (size_t i = 0; i < group.operations.size(); ++i) {
+      Value individualOutput = builder.create<memref::AllocOp>(
+          builder.getUnknownLoc(), originalOutputMemRefType, 
+          ValueRange{}, builder.getI64IntegerAttr(16));
+      individualOutputs.push_back(individualOutput);
+    }
+    
+    LLVM_DEBUG(llvm::dbgs() << "Allocated batched activation and output memory\n");
+    
+    // ========== 阶段3：生成所有的subviews ==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 3: Creating all subviews\n");
+    SmallVector<Value> activationViews;
+    SmallVector<Value> outputViews;
+    
+    for (size_t i = 0; i < group.operations.size(); ++i) {
+      int64_t offset = i * batchDim;
+      
+      // 创建激活子视图
+      SmallVector<OpFoldResult> activationOffsets = {
+          builder.getI64IntegerAttr(offset),
+          builder.getI64IntegerAttr(0),
+          builder.getI64IntegerAttr(0)
+      };
+      SmallVector<OpFoldResult> activationSizes = {
+          builder.getI64IntegerAttr(batchDim),
+          builder.getI64IntegerAttr(singleActivationShape[1]),
+          builder.getI64IntegerAttr(singleActivationShape[2])
+      };
+      SmallVector<OpFoldResult> activationStrides = {
+          builder.getI64IntegerAttr(1),
+          builder.getI64IntegerAttr(1),
+          builder.getI64IntegerAttr(1)
+      };
+      
+      Value activationView = builder.create<memref::SubViewOp>(
+          builder.getUnknownLoc(), batchedActivation, activationOffsets, activationSizes, activationStrides);
+      activationViews.push_back(activationView);
+      
+      // 创建输出子视图
+      SmallVector<OpFoldResult> outputOffsets = {
+          builder.getI64IntegerAttr(offset),
+          builder.getI64IntegerAttr(0),
+          builder.getI64IntegerAttr(0)
+      };
+      SmallVector<OpFoldResult> outputSizes = {
+          builder.getI64IntegerAttr(batchDim),
+          builder.getI64IntegerAttr(outputShape[1]),
+          builder.getI64IntegerAttr(outputShape[2])
+      };
+      SmallVector<OpFoldResult> outputStrides = {
+          builder.getI64IntegerAttr(1),
+          builder.getI64IntegerAttr(1),
+          builder.getI64IntegerAttr(1)
+      };
+      
+      Value outputView = builder.create<memref::SubViewOp>(
+          builder.getUnknownLoc(), batchedOutput, outputOffsets, outputSizes, outputStrides);
+      outputViews.push_back(outputView);
+      
+      LLVM_DEBUG(llvm::dbgs() << "Created subviews for operation " << i << "\n");
+    }
+    
+    // ========== 阶段4：类型转换并执行并行复制 ==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 4: Type conversion and parallel activation copying\n");
+    
+    SmallVector<Value> activationCopyStreams;
+    SmallVector<Value> activationCopyTokens;
+    
+    for (size_t i = 0; i < group.operations.size(); ++i) {
+      auto currentMatMul = dyn_cast<mlir::ONNXMatMulOp>(group.operations[i]);
+      
+      // 获取激活值（根据情况是A或B）
+      Value activation = needsBroadcastB ? currentMatMul.getA() : currentMatMul.getB();
+      
+      // 类型转换
+      Value activationMemRef = builder.create<mlir::UnrealizedConversionCastOp>(
+          builder.getUnknownLoc(), singleActivationMemRefType, activation).getResult(0);
+      
+      // 创建独立的stream并执行复制
+      auto copyStream = builder.create<gpu::WaitOp>(builder.getUnknownLoc(), 
+          gpu::AsyncTokenType::get(builder.getContext()), ValueRange());
+      activationCopyStreams.push_back(copyStream.getAsyncToken());
+      
+      auto copyToken = builder.create<gpu::MemcpyOp>(
+          builder.getUnknownLoc(), 
+          gpu::AsyncTokenType::get(builder.getContext()),
+          ValueRange(copyStream.getAsyncToken()),
+          activationViews[i], activationMemRef);
+      activationCopyTokens.push_back(copyToken.getAsyncToken());
+      
+      LLVM_DEBUG(llvm::dbgs() << "Initiated activation copy for operation " << i << " on dedicated stream\n");
+    }
+    
+    // 等待所有激活复制完成
+    builder.create<gpu::WaitOp>(builder.getUnknownLoc(), Type{}, activationCopyTokens);
+    LLVM_DEBUG(llvm::dbgs() << "All parallel activation copies completed with " 
+              << group.operations.size() << " independent streams\n");
+    
+    // ========== 阶段5：执行融合计算 ==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 5: Performing fused computation\n");
+    
+    // 转换batched activation为tensor
+    Value batchedActivationTensor = builder.create<mlir::UnrealizedConversionCastOp>(
+        builder.getUnknownLoc(), fusedActivationType, batchedActivation).getResult(0);
+    
+    // 创建融合的MatMul操作
+    Value fusedResult;
+    if (needsBroadcastB) {
+      // 3D x 2D: batchedActivation x sharedWeight
+      fusedResult = builder.create<mlir::ONNXMatMulOp>(
+          builder.getUnknownLoc(),
+          fusedOutputType,
+          batchedActivationTensor,
+          sharedWeight);
+      
+      LLVM_DEBUG(llvm::dbgs() << "Created fused MatMul: (" 
+                << fusedActivationShape[0] << "x" << fusedActivationShape[1] << "x" << fusedActivationShape[2] 
+                << ") × (" << bShape[0] << "x" << bShape[1] << ") → ("
+                << fusedOutputShape[0] << "x" << fusedOutputShape[1] << "x" << fusedOutputShape[2] << ")\n");
+    } else {
+      // 2D x 3D: sharedWeight x batchedActivation
+      fusedResult = builder.create<mlir::ONNXMatMulOp>(
+          builder.getUnknownLoc(),
+          fusedOutputType,
+          sharedWeight,
+          batchedActivationTensor);
+      
+      LLVM_DEBUG(llvm::dbgs() << "Created fused MatMul: (" 
+                << aShape[0] << "x" << aShape[1] << ") × ("
+                << fusedActivationShape[0] << "x" << fusedActivationShape[1] << "x" << fusedActivationShape[2] 
+                << ") → (" << fusedOutputShape[0] << "x" << fusedOutputShape[1] << "x" << fusedOutputShape[2] << ")\n");
+    }
+    
+    // 转换融合结果为memref并复制到batched output
+    Value fusedResultMemRef = builder.create<mlir::UnrealizedConversionCastOp>(
+        builder.getUnknownLoc(), outputMemRefType, fusedResult).getResult(0);
+    
+    auto fusedCopyStream = builder.create<gpu::WaitOp>(builder.getUnknownLoc(), 
+        gpu::AsyncTokenType::get(builder.getContext()), ValueRange());
+    auto fusedCopyToken = builder.create<gpu::MemcpyOp>(
+        builder.getUnknownLoc(), 
+        gpu::AsyncTokenType::get(builder.getContext()),
+        ValueRange(fusedCopyStream.getAsyncToken()),
+        batchedOutput, fusedResultMemRef);
+    builder.create<gpu::WaitOp>(builder.getUnknownLoc(), Type{}, ValueRange(fusedCopyToken.getAsyncToken()));
+    
+    LLVM_DEBUG(llvm::dbgs() << "Copied fused result to batched output memory\n");
+    
+    // ========== 阶段6：并行输出复制 ==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 6: Performing parallel output copies\n");
+    
+    SmallVector<Value> outputCopyStreams;
+    SmallVector<Value> outputCopyTokens;
+    
+    for (size_t i = 0; i < group.operations.size(); ++i) {
+      auto copyStream = builder.create<gpu::WaitOp>(builder.getUnknownLoc(), 
+          gpu::AsyncTokenType::get(builder.getContext()), ValueRange());
+      outputCopyStreams.push_back(copyStream.getAsyncToken());
+      
+      auto copyToken = builder.create<gpu::MemcpyOp>(
+          builder.getUnknownLoc(), 
+          gpu::AsyncTokenType::get(builder.getContext()),
+          ValueRange(copyStream.getAsyncToken()),
+          individualOutputs[i], outputViews[i]);
+      outputCopyTokens.push_back(copyToken.getAsyncToken());
+    }
+    
+    builder.create<gpu::WaitOp>(builder.getUnknownLoc(), Type{}, outputCopyTokens);
+    LLVM_DEBUG(llvm::dbgs() << "All parallel output copies completed\n");
+    
+    // ========== 阶段7：结果替换和清理 ==========
+    LLVM_DEBUG(llvm::dbgs() << "Stage 7: Result replacement and cleanup\n");
+    
+    SmallVector<Value> splitResults;
+    for (size_t i = 0; i < group.operations.size(); ++i) {
+      Value splitResult = builder.create<mlir::UnrealizedConversionCastOp>(
+          builder.getUnknownLoc(), outputType, individualOutputs[i]).getResult(0);
+      splitResults.push_back(splitResult);
+    }
+    
+    // 替换所有使用并删除操作
+    for (size_t i = 0; i < group.operations.size(); ++i) {
+      Operation* op = group.operations[i];
+      op->getResult(0).replaceAllUsesWith(splitResults[i]);
+      LLVM_DEBUG(llvm::dbgs() << "Replaced batch matmul operation " << i << " result\n");
+    }
+    
+    for (size_t i = 0; i < group.operations.size(); ++i) {
+      Operation* op = group.operations[i];
+      LLVM_DEBUG(llvm::dbgs() << "Erasing batch matmul operation " << i << "\n");
+      op->erase();
+    }
+    
+    LLVM_DEBUG(llvm::dbgs() << "Successfully fused batch MatMul operations with shared weights\n");
+    LLVM_DEBUG(llvm::dbgs() << "Optimization: avoided " << group.operations.size() 
+              << " redundant weight broadcasts and copies by sharing single weight matrix\n");
+    return true;
+  }
+
+  // 专门处理batch matmul的融合函数 - 增加权重去重优化
+  bool fuseBatchMatMulOperationsWithFullBatching(OpBuilder& builder, FusibleGroup& group) {
     LLVM_DEBUG(llvm::dbgs() << "Fusing " << group.operations.size() << " Batch MatMul operations with weight deduplication\n");
     
     Operation* firstOp = group.operations[0];
