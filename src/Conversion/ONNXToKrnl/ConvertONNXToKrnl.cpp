@@ -420,6 +420,8 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
     target.addLegalOp<ONNXReduceMeanV13Op>(); // modified by p (BERT fusion needs this)
     target.addLegalOp<ONNXReduceSumV11Op>(); // modified by p (BERT fusion needs this)
     target.addLegalOp<ONNXMHAOp>(); // modified by p (BERT fusion needs this)
+    target.addLegalOp<ONNXConcatOp>(); // modified by p (BERT fusion needs this)
+    target.addLegalOp<ONNXSplitOp>(); // modified by p (BERT fusion needs this)
   }
 
   // 定义检查函数：判断是否为 normalization/MHA 相关操作

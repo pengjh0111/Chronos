@@ -1062,14 +1062,14 @@ private:
       return fuseMaxPoolOperations(builder, group);
     } else if (group.opType == "MatMul") {
       // 这里处理纯MatMul或者Gemm(bias=0)的融合
-      return fuseMatMulOperations(builder, group);
-      // return true;
+      // return fuseMatMulOperations(builder, group);
+      return true;
     } else if (group.opType == "Gemm") {
       // 这里处理有非零bias的Gemm融合
       return fuseGemmOperations(builder, group);
     } else if (group.opType == "ReduceMean") {
-      // return fuseReduceMeanOperations(builder, group);
-      return true;
+      return fuseReduceMeanOperations(builder, group);
+      // return true;
     } else if (group.opType == "Transpose") {  // 新增
       // return fuseTransposeOperations(builder, group);
       return true;
@@ -2116,6 +2116,172 @@ private:
     LLVM_DEBUG(llvm::dbgs() << "Successfully fused ReduceMean operations with parallel copying\n");
     return true;
   }
+
+  // // 使用onnx.concat和onnx.split融合ReduceMean操作
+  // bool fuseReduceMeanOperations(OpBuilder& builder, FusibleGroup& group) {
+  //     LLVM_DEBUG(llvm::dbgs() << "Fusing " << group.operations.size() << " ReduceMean operations using Concat/Split\n");
+      
+  //     Operation* firstOp = group.operations[0];
+  //     auto firstReduceMean = dyn_cast<mlir::ONNXReduceMeanV13Op>(firstOp);
+  //     if (!firstReduceMean) {
+  //       LLVM_DEBUG(llvm::dbgs() << "First operation is not a ReduceMean op\n");
+  //       return false;
+  //     }
+      
+  //     // 获取输入输出类型
+  //     auto inputType = firstReduceMean.getData().getType().cast<RankedTensorType>();
+  //     auto outputType = firstReduceMean.getReduced().getType().cast<RankedTensorType>();
+      
+  //     ArrayRef<int64_t> inputShape = inputType.getShape();
+  //     ArrayRef<int64_t> outputShape = outputType.getShape();
+      
+  //     // 验证所有操作具有相同的属性
+  //     auto axes = firstReduceMean.getAxes();
+  //     auto keepdims = firstReduceMean.getKeepdims();
+      
+  //     for (size_t i = 1; i < group.operations.size(); ++i) {
+  //       auto currentReduceMean = dyn_cast<mlir::ONNXReduceMeanV13Op>(group.operations[i]);
+  //       if (!currentReduceMean) {
+  //         LLVM_DEBUG(llvm::dbgs() << "Operation " << i << " is not a ReduceMean op\n");
+  //         return false;
+  //       }
+        
+  //       // 检查属性是否一致
+  //       if (currentReduceMean.getAxes() != axes || currentReduceMean.getKeepdims() != keepdims) {
+  //         LLVM_DEBUG(llvm::dbgs() << "ReduceMean operations have different attributes, cannot fuse\n");
+  //         return false;
+  //       }
+        
+  //       // 检查输入输出形状是否一致
+  //       auto currentInputType = currentReduceMean.getData().getType().cast<RankedTensorType>();
+  //       auto currentOutputType = currentReduceMean.getReduced().getType().cast<RankedTensorType>();
+        
+  //       if (currentInputType.getShape() != inputShape || currentOutputType.getShape() != outputShape) {
+  //         LLVM_DEBUG(llvm::dbgs() << "ReduceMean operations have different shapes, cannot fuse\n");
+  //         return false;
+  //       }
+  //     }
+      
+  //     // 计算融合后的batch大小
+  //     int64_t originalBatchSize = inputShape[0];
+  //     int64_t fusedBatchSize = originalBatchSize * group.operations.size();
+      
+  //     // 创建融合后的形状
+  //     SmallVector<int64_t> fusedInputShape(inputShape.begin(), inputShape.end());
+  //     SmallVector<int64_t> fusedOutputShape(outputShape.begin(), outputShape.end());
+  //     fusedInputShape[0] = fusedBatchSize;
+  //     fusedOutputShape[0] = fusedBatchSize;
+      
+  //     auto fusedInputType = RankedTensorType::get(fusedInputShape, inputType.getElementType());
+  //     auto fusedOutputType = RankedTensorType::get(fusedOutputShape, outputType.getElementType());
+      
+  //     LLVM_DEBUG(llvm::dbgs() << "Fusing ReduceMean: input " << inputShape.size() << "D -> output " << outputShape.size() << "D\n");
+  //     LLVM_DEBUG(llvm::dbgs() << "Original batch size: " << originalBatchSize << " -> Fused batch size: " << fusedBatchSize << "\n");
+      
+  //     // 步骤1: 收集所有输入张量
+  //     SmallVector<Value> inputTensors;
+  //     for (size_t i = 0; i < group.operations.size(); ++i) {
+  //       Operation* currentOp = group.operations[i];
+  //       Value originalInput = currentOp->getOperand(0);
+  //       inputTensors.push_back(originalInput);
+  //     }
+      
+  //     // 步骤2: 使用 onnx.Concat 拼接所有输入（沿着 batch 维度，axis=0）
+  //     // 创建 signed integer attribute (si64)
+  //     auto axisAttr = mlir::IntegerAttr::get(
+  //         mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Signed),
+  //         0
+  //     );
+      
+  //     Value concatInput = builder.create<mlir::ONNXConcatOp>(
+  //         builder.getUnknownLoc(),
+  //         fusedInputType,
+  //         inputTensors,
+  //         axisAttr  // axis = 0 : si64
+  //     );
+      
+  //     LLVM_DEBUG(llvm::dbgs() << "Created Concat operation for " << group.operations.size() << " inputs\n");
+      
+  //     // 步骤3: 创建融合的 ReduceMean 操作
+  //     Value fusedResult;
+  //     if (axes.has_value()) {
+  //       // 如果有axes属性，使用带axes的构造函数
+  //       fusedResult = builder.create<mlir::ONNXReduceMeanV13Op>(
+  //           builder.getUnknownLoc(),
+  //           fusedOutputType,        // result type
+  //           concatInput,           // data (from concat)
+  //           axes.value(),          // axes (ArrayAttr)
+  //           keepdims);             // keepdims (IntegerAttr)
+  //     } else {
+  //       // 如果没有axes属性，使用不带axes的构造函数
+  //       fusedResult = builder.create<mlir::ONNXReduceMeanV13Op>(
+  //           builder.getUnknownLoc(),
+  //           fusedOutputType,        // result type  
+  //           concatInput,           // data (from concat)
+  //           mlir::ArrayAttr{},     // axes (empty)
+  //           keepdims);             // keepdims (IntegerAttr)
+  //     }
+      
+  //     LLVM_DEBUG(llvm::dbgs() << "Created fused ReduceMean operation\n");
+      
+  //     // 步骤4: 创建 split 张量，指定每个输出的大小
+  //     // 对于 ReduceMean，每个分片的大小都是 originalBatchSize
+  //     SmallVector<int64_t> splitSizes(group.operations.size(), originalBatchSize);
+  //     auto splitType = RankedTensorType::get({static_cast<int64_t>(group.operations.size())}, 
+  //                                           builder.getI64Type());
+      
+  //     // 创建常量张量作为 split 的第二个参数
+  //     SmallVector<mlir::Attribute> splitAttrs;
+  //     for (int64_t size : splitSizes) {
+  //       splitAttrs.push_back(builder.getI64IntegerAttr(size));
+  //     }
+  //     auto splitAttr = mlir::DenseElementsAttr::get(splitType, splitAttrs);
+      
+  //     // 使用正确的 ONNXConstantOp 构造函数
+  //     Value splitTensor = builder.create<mlir::ONNXConstantOp>(
+  //         builder.getUnknownLoc(),
+  //         mlir::Attribute{},  // sparse_value (nullptr)
+  //         splitAttr           // value (DenseElementsAttr)
+  //     );
+      
+  //     // 步骤5: 使用 onnx.Split 拆分融合后的输出
+  //     // Split 操作返回多个结果，每个结果对应原始的一个输出
+  //     SmallVector<Type> splitResultTypes(group.operations.size(), outputType);
+      
+  //     auto numOutputsAttr = mlir::IntegerAttr::get(
+  //         mlir::IntegerType::get(builder.getContext(), 64, mlir::IntegerType::Signed),
+  //         static_cast<int64_t>(group.operations.size())
+  //     );
+
+  //     auto splitOp = builder.create<mlir::ONNXSplitOp>(
+  //         builder.getUnknownLoc(),
+  //         splitResultTypes,
+  //         fusedResult,
+  //         splitTensor,
+  //         axisAttr,
+  //         numOutputsAttr
+  //     );
+      
+  //     LLVM_DEBUG(llvm::dbgs() << "Created Split operation with " << group.operations.size() << " outputs\n");
+      
+  //     // 步骤6: 替换原始操作的使用
+  //     for (size_t i = 0; i < group.operations.size(); ++i) {
+  //       Operation* op = group.operations[i];
+  //       Value splitResult = splitOp.getResult(i);
+  //       op->getResult(0).replaceAllUsesWith(splitResult);
+  //       LLVM_DEBUG(llvm::dbgs() << "Replaced ReduceMean operation " << i << " result\n");
+  //     }
+      
+  //     // 步骤7: 删除原始操作
+  //     for (size_t i = 0; i < group.operations.size(); ++i) {
+  //       Operation* op = group.operations[i];
+  //       LLVM_DEBUG(llvm::dbgs() << "Erasing ReduceMean operation " << i << "\n");
+  //       op->erase();
+  //     }
+      
+  //     LLVM_DEBUG(llvm::dbgs() << "Successfully fused ReduceMean operations using Concat/Split\n");
+  //     return true;
+  // }
 
   // 融合Conv操作 - 并行复制版本
   bool fuseConvOperations(OpBuilder& builder, FusibleGroup& group) {

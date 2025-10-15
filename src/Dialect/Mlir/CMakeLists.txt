@@ -30,6 +30,8 @@ add_onnx_mlir_library(OMMlirDialects
   Lower4DMatMul.cpp
   ConvertReduceMeanCallToAffineLoop.cpp
   ConvertMHAPatternToOp.cpp
+  ConvertConcatSplitToAffineLoop.cpp
+  ConvertMemcpyToAffineLoop.cpp
 
   DEPENDS
   OMKrnlIncGen

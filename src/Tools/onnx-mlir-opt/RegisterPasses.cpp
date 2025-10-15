@@ -36,9 +36,19 @@ void registerOMPasses(int optLevel) {
   // All passes implemented within onnx-mlir should register within this
   // function to make themselves available as a command-line option.
 
+
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> { //modified by p
+    return createConvertMemcpyToAffinePass();
+  });
+
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> { //modified by p
+    return createConvertConcatSplitToAffinePass();
+  });
+
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> { //modified by p
     return createConvertMHAPatternToOpPass();
   });
+  
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> { //modified by p
     return createConvertReduceMeanToAffinePass();
   });

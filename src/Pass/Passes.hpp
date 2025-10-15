@@ -108,6 +108,10 @@ std::unique_ptr<mlir::Pass> createLowerToStablehloPass(bool enableUnroll);
 /// Pass for eliding the values of global Krnl operations.
 std::unique_ptr<mlir::Pass> createElideConstGlobalValuePass();
 
+std::unique_ptr<mlir::Pass> createConvertMemcpyToAffinePass(); //modified by p
+
+std::unique_ptr<mlir::Pass> createConvertConcatSplitToAffinePass(); //modified by p
+
 std::unique_ptr<mlir::Pass> createConvertMHAPatternToOpPass(); //modified by p
 
 std::unique_ptr<mlir::Pass> createConvertReduceMeanToAffinePass(); //modified by p
