@@ -399,7 +399,7 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
     // being lowered further. See the comment in the declaration of
     // 'emitIntermediateIR' for more details.
     target.addLegalOp<ONNXMatMulOp>(); // modified by p
-    target.addLegalOp<ONNXReshapeOp>();
+    // target.addLegalOp<ONNXReshapeOp>(); // MobileNet needs this
     // target.addLegalOp<ONNXSplitV11Op>();
     // target.addLegalOp<ONNXSqueezeV11Op>();
     target.addLegalOp<ONNXTransposeOp>(); // BERT needs this

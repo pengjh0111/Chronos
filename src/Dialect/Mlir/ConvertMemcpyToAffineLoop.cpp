@@ -701,6 +701,26 @@ private:
           LLVM_DEBUG(llvm::dbgs() << "Found mgpuCudnnReduceMean with " 
                      << info.targetMemrefs.size() << " target memrefs\n");
         }
+      } else if (callee == "mgpuCudnnConv2dForward") {
+        // Conv2dForward: 参数索引 13 是输入，参数索引 16 是输出
+        WrapperFuncInfo info(callOp, false);
+        
+        auto operands = callOp.getOperands();
+        if (operands.size() > 16) {
+          Value inPtr = operands[13];
+          Value outPtr = operands[16];
+          
+          if (auto inMemref = traceBackToMemref(inPtr)) {
+            info.targetMemrefs.push_back(inMemref);
+          }
+          if (auto outMemref = traceBackToMemref(outPtr)) {
+            info.targetMemrefs.push_back(outMemref);
+          }
+          
+          wrappers.push_back(info);
+          LLVM_DEBUG(llvm::dbgs() << "Found mgpuCudnnConv2dForward with " 
+                    << info.targetMemrefs.size() << " target memrefs\n");
+        }
       }
     });
     

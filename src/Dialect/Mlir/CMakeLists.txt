@@ -32,6 +32,7 @@ add_onnx_mlir_library(OMMlirDialects
   ConvertMHAPatternToOp.cpp
   ConvertConcatSplitToAffineLoop.cpp
   ConvertMemcpyToAffineLoop.cpp
+  InsertGpuDeallocPass.cpp
 
   DEPENDS
   OMKrnlIncGen

@@ -19,6 +19,8 @@
 #include <llvm/Support/ToolOutputFile.h>
 #include <mlir/Dialect/GPU/IR/GPUDialect.h> //add by p
 #include <mlir/Dialect/LLVMIR/NVVMDialect.h> //add by p
+#include <mlir/Dialect/LLVMIR/ROCDLDialect.h>// add by p
+#include <mlir/Dialect/AMDGPU/IR/AMDGPUDialect.h>// add by p
 #include <mlir/Dialect/Bufferization/Pipelines/Passes.h>
 #include <mlir/Dialect/Bufferization/Transforms/Passes.h>
 #include <mlir/Dialect/MemRef/Transforms/Passes.h>
@@ -123,6 +125,8 @@ int main(int argc, char **argv) {
   registry.insert<tosa::TosaDialect>();
   registry.insert<gpu::GPUDialect>(); //add by p
   registry.insert<NVVM::NVVMDialect>(); //add by p
+  // registry.insert<ROCDL::ROCDLDialect>(); //add by p
+  // registry.insert<amdgpu::AMDGPUDialect>(); //add by p
 
   bufferization::registerBufferizationPipelines();
 

@@ -1059,11 +1059,12 @@ private:
         bool hack = fuseConvOperations(builder, group);
       return true;
     } else if (group.opType == "MaxPool" || group.opType == "MaxPoolSingleOut") {
-      return fuseMaxPoolOperations(builder, group);
+      // return fuseMaxPoolOperations(builder, group);
+      return true;
     } else if (group.opType == "MatMul") {
       // 这里处理纯MatMul或者Gemm(bias=0)的融合
-      // return fuseMatMulOperations(builder, group);
-      return true;
+      return fuseMatMulOperations(builder, group);
+      // return true;
     } else if (group.opType == "Gemm") {
       // 这里处理有非零bias的Gemm融合
       return fuseGemmOperations(builder, group);
