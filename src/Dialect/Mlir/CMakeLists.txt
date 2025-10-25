@@ -33,6 +33,7 @@ add_onnx_mlir_library(OMMlirDialects
   ConvertConcatSplitToAffineLoop.cpp
   ConvertMemcpyToAffineLoop.cpp
   InsertGpuDeallocPass.cpp
+  OptimizegpustreamPass.cpp
 
   DEPENDS
   OMKrnlIncGen
