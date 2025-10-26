@@ -721,6 +721,49 @@ private:
           LLVM_DEBUG(llvm::dbgs() << "Found mgpuCudnnConv2dForward with " 
                     << info.targetMemrefs.size() << " target memrefs\n");
         }
+      } else if (callee == "mgpuCulibsFullyConnectedForward") {
+        // FullyConnectedForward: 参数索引 4 是输入，参数索引 7 是输出
+        // 参数索引 5 是权重，不需要处理
+        WrapperFuncInfo info(callOp, false);
+        
+        auto operands = callOp.getOperands();
+        if (operands.size() > 7) {
+          Value inPtr = operands[4];   // %1177 - 输入
+          // Value weightPtr = operands[5]; // %1179 - 权重，不处理
+          Value outPtr = operands[7];  // %1181 - 输出
+          
+          if (auto inMemref = traceBackToMemref(inPtr)) {
+            info.targetMemrefs.push_back(inMemref);
+          }
+          if (auto outMemref = traceBackToMemref(outPtr)) {
+            info.targetMemrefs.push_back(outMemref);
+          }
+          
+          wrappers.push_back(info);
+          LLVM_DEBUG(llvm::dbgs() << "Found mgpuCulibsFullyConnectedForward with " 
+                    << info.targetMemrefs.size() << " target memrefs\n");
+        }
+      } else if (callee == "mgpuCudnnMaxPoolForward") {
+        // MaxPoolForward: 参数索引 15 是输入，参数索引 16 是输出
+        WrapperFuncInfo info(callOp, false);
+        
+        auto operands = callOp.getOperands();
+        if (operands.size() > 16) {
+          Value inPtr = operands[15];  // 输入
+          Value outPtr = operands[16]; // 输出
+          // operands[17] 可能是workspace，不处理
+          
+          if (auto inMemref = traceBackToMemref(inPtr)) {
+            info.targetMemrefs.push_back(inMemref);
+          }
+          if (auto outMemref = traceBackToMemref(outPtr)) {
+            info.targetMemrefs.push_back(outMemref);
+          }
+          
+          wrappers.push_back(info);
+          LLVM_DEBUG(llvm::dbgs() << "Found mgpuCudnnMaxPoolForward with " 
+                    << info.targetMemrefs.size() << " target memrefs\n");
+        }
       }
     });
     
