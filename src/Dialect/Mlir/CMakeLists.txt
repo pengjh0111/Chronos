@@ -35,6 +35,8 @@ add_onnx_mlir_library(OMMlirDialects
   InsertGpuDeallocPass.cpp
   OptimizegpustreamPass.cpp
   MergeGpuModulesPass.cpp
+  ConvertONNXToOneDNN.cpp
+  ConvertGpuMemcpyToMemrefCopyPass.cpp
 
   DEPENDS
   OMKrnlIncGen
