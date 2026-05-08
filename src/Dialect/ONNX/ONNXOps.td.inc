@@ -11374,3 +11374,262 @@ def ONNXMHAOp:ONNX_Op<"MHA",
     }
   }];
 }
+
+// ════════════════════════════════════════════════════════════════
+// ONNXLIFOp — 2输入 / 2输出版本
+//
+// 变更说明：
+//   原版 3输入 (x, v, i_state) / 3输出 (spike, v_next, i_next)
+//   →  新版 2输入 (x, v_combined) / 2输出 (spike, v_combined_next)
+//
+//   电流状态 I 被隐藏在 v_combined 的后半维度中：
+//     v_combined (B, 2N)：前 N 维 = 膜电位 V，后 N 维 = 电流状态 I
+//
+//   与 C 硬件实现中"电流由 neuron state 寄存器内部维护"
+//   对外不可见的语义完全对齐。
+// ════════════════════════════════════════════════════════════════
+
+def ONNXLIFOp : ONNX_Op<"LIF",
+    [Pure]> {
+
+  let summary = "Leaky Integrate-and-Fire neuron (custom SNN op, hidden current state)";
+
+  let description = [{
+    Single-step LIF neuron. Current state I is hidden inside v_combined
+    (back-half of the last dimension), matching the hardware register semantics
+    where current is maintained internally and not exposed to the caller.
+
+    v_combined layout: [ V (N dims) || I (N dims) ]  →  shape (B, 2N)
+
+    Update equations (integer fixed-point, matching run_lsm_sparse):
+      N        = v_combined.shape[-1] / 2
+      v        = v_combined[..., :N]
+      i_state  = v_combined[..., N:]
+
+      i_new   = i_state + x
+      v_new   = v - v // tau_v + i_new // tau_vi
+      spike   = (v_new > v_th) ? 1 : 0
+      v_next  = spike ? v_reset : v_new
+      i_next  = spike ? 0 : i_new
+      i_next -= i_next // tau_i          (decay, applied regardless of spike)
+
+      v_combined_next = cat(v_next, i_next, dim=-1)   // shape (B, 2N)
+
+    Attributes:
+      v_th_f    (float): firing threshold
+      v_reset_f (float): reset potential after spike (= 0)
+      tau_v_f   (float): voltage leak divisor  (exc=1024, inh=64)
+      tau_i_f   (float): current decay divisor (= 16)
+      tau_vi_f  (float): current-to-voltage scale divisor (= 8)
+  }];
+
+  // ── 输入：2个张量 + 5个属性 ─────────────────────────────────
+  let arguments = (ins
+    // x          : 突触电流增量 (B, N)
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$x,
+
+    // v_combined : [膜电位 V || 电流状态 I] 拼接张量 (B, 2N)
+    //              电流隐藏在后半维度，不对外暴露
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$v_combined,
+
+    DefaultValuedAttr<F32Attr, "1.0">:$v_th,
+    DefaultValuedAttr<F32Attr, "0.0">:$v_reset,
+    DefaultValuedAttr<F32Attr, "1024.0">:$tau_v,
+    DefaultValuedAttr<F32Attr, "16.0">:$tau_i,
+    DefaultValuedAttr<F32Attr, "8.0">:$tau_vi
+  );
+
+  // ── 输出：2个张量 ────────────────────────────────────────────
+  let results = (outs
+    // spike           : 本步脉冲 0/1  (B, N)
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$spike,
+
+    // v_combined_next : 更新后 [V || I] (B, 2N)
+    //                   仍然隐藏电流，供下一时间步继续使用
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$v_combined_next
+  );
+
+  // ── builder ─────────────────────────────────────────────────
+  let builders = [
+    OpBuilder<(ins
+      "Value":$x,
+      "Value":$v_combined,
+      "FloatAttr":$v_th,
+      "FloatAttr":$v_reset,
+      "FloatAttr":$tau_v,
+      "FloatAttr":$tau_i,
+      "FloatAttr":$tau_vi
+    )>
+  ];
+}
+
+
+// ════════════════════════════════════════════════════════════════
+// ONNXMultiStepLIFOp — 多步时序 LIF
+// ════════════════════════════════════════════════════════════════
+
+def ONNXMultiStepLIFOp : ONNX_Op<"MultiStepLIF", [Pure]> {
+  let summary = "Multi-step Leaky Integrate-and-Fire neuron, iterating over T dimension.";
+
+  let description = [{
+    Multi-step LIF neuron execution. Takes the entire time sequence `x_seq` 
+    and processes it internally step-by-step, maintaining hardware state.
+
+    Input shapes:
+      x_seq           : (T, N)
+      v_combined_init : (1, 2N)
+    Output shapes:
+      spike_seq       : (T, N)
+      v_combined_final: (1, 2N)
+  }];
+
+  let arguments = (ins
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$x_seq,
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$v_combined_init,
+
+    DefaultValuedAttr<F32Attr, "1.0">:$v_th,
+    DefaultValuedAttr<F32Attr, "0.0">:$v_reset,
+    DefaultValuedAttr<F32Attr, "1024.0">:$tau_v,
+    DefaultValuedAttr<F32Attr, "16.0">:$tau_i,
+    DefaultValuedAttr<F32Attr, "8.0">:$tau_vi
+  );
+
+  let results = (outs
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$spike_seq,
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$v_combined_final
+  );
+
+  let builders = [
+    OpBuilder<(ins
+      "Value":$x_seq,
+      "Value":$v_combined_init,
+      "FloatAttr":$v_th,
+      "FloatAttr":$v_reset,
+      "FloatAttr":$tau_v,
+      "FloatAttr":$tau_i,
+      "FloatAttr":$tau_vi
+    )>
+  ];
+}
+
+
+// ════════════════════════════════════════════════════════════════
+// ONNXDataToVectorOp — 硬件输入打包算子
+// ════════════════════════════════════════════════════════════════
+
+def ONNXDataToVectorOp : ONNX_Op<"DataToVector", [Pure]> {
+  let summary = "Pack sparse spike indices into hardware-friendly bit vectors.";
+
+  let description = [{
+    Converts a standard input tensor into a bit-packed vector.
+    In the hardware C implementation, this corresponds to:
+    input_vector[index] |= (1U << bit);
+
+    Input:  A spike tensor (e.g., shape [Batch, N]) where 1 represents a spike.
+    Output: A packed i32 tensor (e.g., shape [Batch, N/32]) where each element 
+            contains 32 neurons' spike states as bits.
+  }];
+
+  let arguments = (ins
+    // input: 原始脉冲输入 (B, N)
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$input,
+    
+    // bit_width: 打包位宽，默认 32 (对应 C 代码中的 32)
+    DefaultValuedAttr<I32Attr, "32">:$bit_width
+  );
+
+  let results = (outs
+    // output_vector: 打包后的位向量 (B, N/32)
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$output_vector
+  );
+}
+
+// ════════════════════════════════════════════════════════════════
+// ONNXSNNFCOp — 脉冲触发的全连接算子 (加法代替乘法)
+// ════════════════════════════════════════════════════════════════
+
+// def ONNXSNNFCOp : ONNX_Op<"SNNFC", [Pure]> {
+//   let summary = "Spiking Fully Connected layer (Current Accumulation).";
+
+//   let description = [{
+//     Performs the hardware-accelerated FC operation where multiplication is 
+//     replaced by accumulation triggered by input spikes.
+
+//     Mathematically: x_j = sum_{i=0}^{N-1} ( (input_vector_bit_i == 1) ? weight_{ij} : 0 )
+
+//     This op maps to the C code:
+//       rvne_write_wvr(weight[k][j], k);
+//       rvne_current_acc_128(k, k, j);
+
+//     Input:
+//       - input_vector: Packed bit vector from DataToVector (B, N/32).
+//       - weight: The weight matrix (N, M), typically pre-processed/packed.
+//     Output:
+//       - x: Accumulated synaptic current (B, M), which serves as input to LIF.
+//   }];
+
+//   let arguments = (ins
+//     // input_vector: 位向量输入 (B, N/32)
+//     AnyTypeOf<[AnyMemRef, AnyTensor]>:$input_vector,
+
+//     // weight: 权重张量 (N, M)
+//     // 注意：在硬件底层，这个权重通常是以定点数存储的
+//     AnyTypeOf<[AnyMemRef, AnyTensor]>:$weight
+//   );
+
+//   let results = (outs
+//     // x: 累加后的电流增量 (B, M)，直接输入给下一个 LIF 算子
+//     AnyTypeOf<[AnyMemRef, AnyTensor]>:$x
+//   );
+// }
+def ONNXSNNFCOp : ONNX_Op<"SNNFC", [Pure]> {
+  let summary = "Spiking Fully Connected layer (hardware current accumulation with two weight banks).";
+
+  let description = [{
+    Hardware-accelerated spiking fully connected accumulation. This op models:
+
+      // 1) load packed spikes into SVR
+      for (int j = 0; j < 32; ++j)
+        rvne_write_svr(input_vector[j], j);
+
+      // 2) first accumulation stage (inputweight)
+      for (int j = 0; j < NeuronNum; ++j) {
+        for (int k = 0; k < 25; ++k)
+          rvne_write_wvr(inputweight[k][j], k);
+        for (int g = 0; g < 2; ++g)
+          rvne_current_acc_128(g, g, j);
+      }
+
+      rvne_spike_propagation_1024();
+
+      // 3) second accumulation stage (lsmweight)
+      for (int j = 0; j < NeuronNum; ++j) {
+        for (int k = 0; k < 100; ++k)
+          rvne_write_wvr(lsmweight[k][j], k);
+        for (int g = 0; g < 7; ++g)
+          rvne_current_acc_128(g, g, j);
+      }
+
+    Inputs:
+      - input_vector: packed spike bit-vector from DataToVector, shape (B, 32).
+      - inputweight:  first-stage packed weights, shape (25, NeuronNum).
+      - lsmweight:    second-stage packed weights, shape (100, NeuronNum).
+      - shape_anchor: a tensor used only to carry static output shape, shape (B, NeuronNum).
+
+    Output:
+      - x: accumulated synaptic current increment (B, NeuronNum).
+  }];
+
+  let arguments = (ins
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$input_vector,
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$inputweight,
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$lsmweight,
+
+    // 仅用于 shape 推导/静态化：其 type 直接作为输出 type
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$shape_anchor
+  );
+
+  let results = (outs
+    AnyTypeOf<[AnyMemRef, AnyTensor]>:$x
+  );
+}

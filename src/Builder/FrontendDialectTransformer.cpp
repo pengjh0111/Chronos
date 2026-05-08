@@ -1616,6 +1616,10 @@ private:
 
   void InitHandlerMap() {
 #include "src/Builder/OpBuildTable.inc"
+  // ── 自定义 SNN op ──────────────────────────────────────────
+  import_handler_map_["LIF"] = &FrontendGenImpl::ImportNodeLIF;
+  import_handler_map_["DataToVector"] = &FrontendGenImpl::ImportNodeDataToVector;
+  import_handler_map_["SNNFC"] = &FrontendGenImpl::ImportNodeSNNFC;
   }
 
   /*!
@@ -1729,6 +1733,205 @@ private:
 
     return mainFunc;
   }
+
+/*
+ * ImportNodeLIF — 2输入 / 2输出版本
+ *
+ * 变更说明：
+ *   原版 3输入 (x, v, i_state) / 3输出 (spike, v_next, i_next)
+ *   →  新版 2输入 (x, v_combined) / 2输出 (spike, v_combined_next)
+ *
+ *   v_combined (B, 2N)：前 N 维 = 膜电位 V，后 N 维 = 电流状态 I
+ *   电流不再作为独立的 ONNX 张量传递，而是打包在 v_combined 内部，
+ *   与 C 硬件算子"电流由 neuron state 寄存器内部维护"的语义对齐。
+ *
+ *   Python symbolic 侧同步修改：
+ *     outputs=2   （spike, v_combined_next）
+ */
+void ImportNodeLIF(const onnx::NodeProto &node) {
+  // ── 收集两个输入：x, v_combined ──────────────────────────────
+  std::vector<Value> inputs;
+  getNodeInputs(node, inputs);
+  assert(inputs.size() == 2 &&
+         "LIF node expects exactly 2 inputs: x, v_combined "
+         "(current is hidden in the back-half of v_combined)");
+
+  // ── 提取五个属性（带默认值兜底）────────────────────────────────
+  float v_th    = 1.0f;
+  float v_reset = 0.0f;
+  float tau_v   = 1024.0f;
+  float tau_i   = 16.0f;
+  float tau_vi  = 8.0f;
+
+  for (int i = 0; i < node.attribute_size(); ++i) {
+    const auto &attr = node.attribute(i);
+    if      (attr.name() == "v_th_f")    v_th    = attr.f();
+    else if (attr.name() == "v_reset_f") v_reset = attr.f();
+    else if (attr.name() == "tau_v_f")   tau_v   = attr.f();
+    else if (attr.name() == "tau_i_f")   tau_i   = attr.f();
+    else if (attr.name() == "tau_vi_f")  tau_vi  = attr.f();
+  }
+
+  // ── 构造 MLIR 属性 ─────────────────────────────────────────
+  auto v_th_attr    = builder_.getF32FloatAttr(v_th);
+  auto v_reset_attr = builder_.getF32FloatAttr(v_reset);
+  auto tau_v_attr   = builder_.getF32FloatAttr(tau_v);
+  auto tau_i_attr   = builder_.getF32FloatAttr(tau_i);
+  auto tau_vi_attr  = builder_.getF32FloatAttr(tau_vi);
+
+  // ── 推断输出类型 ───────────────────────────────────────────
+  //   inputs[0] = x          : (B, N)   → spike 类型相同
+  //   inputs[1] = v_combined : (B, 2N)  → v_combined_next 类型相同
+  Type spikeType      = inputs[0].getType();   // (B, N)
+  Type vCombinedType  = inputs[1].getType();   // (B, 2N)
+
+  // ── 构造 ONNXLIFOp ─────────────────────────────────────────
+  auto lifOp = builder_.create<ONNXLIFOp>(
+      ImportLoc(node),
+      /*spike=*/              spikeType,
+      /*v_combined_next=*/    vCombinedType,
+      /*x=*/                  inputs[0],
+      /*v_combined=*/         inputs[1],
+      v_th_attr,
+      v_reset_attr,
+      tau_v_attr,
+      tau_i_attr,
+      tau_vi_attr);
+
+  // ── 绑定两个输出 ────────────────────────────────────────────
+  // Python symbolic 侧 outputs=2，ONNX 节点有两个输出槽
+  if (node.output_size() >= 1 && !node.output(0).empty())
+    frontend_symbols_.AddMapping(node.output(0), lifOp.getSpike());
+  if (node.output_size() >= 2 && !node.output(1).empty())
+    frontend_symbols_.AddMapping(node.output(1), lifOp.getVCombinedNext());
+}
+
+/**
+ * @brief 导入 DataToVector 节点
+ * 输入: input (B, N)
+ * 属性: bit_width (默认 32)
+ * 输出: output_vector (B, N/32)
+ */
+// void ImportNodeDataToVector(const onnx::NodeProto &node) {
+//   std::vector<Value> inputs;
+//   getNodeInputs(node, inputs);
+//   assert(inputs.size() == 1 && "DataToVector node expects exactly 1 input");
+
+//   // 1. 提取属性 bit_width
+//   int32_t bit_width = 32;
+//   for (int i = 0; i < node.attribute_size(); ++i) {
+//     const auto &attr = node.attribute(i);
+//     if (attr.name() == "bit_width_i") bit_width = static_cast<int32_t>(attr.i());
+//   }
+
+//   // 2. 仿照 LIF 获取输入 Type 并修改维度
+//   auto inputType = mlir::cast<RankedTensorType>(inputs[0].getType());
+//   auto shape = inputType.getShape().vec(); // 获取原始形状 (B, N)
+  
+//   // 修改最后一维：N -> N / bit_width
+//   if (shape.back() != mlir::ShapedType::kDynamic) {
+//     // shape.back() = shape.back() / bit_width;
+//     shape.back() = (shape.back() + bit_width - 1) / bit_width;
+//   }
+
+//   // 构造新的输出 Type
+//   Type outputType = RankedTensorType::get(shape, inputType.getElementType());
+
+//   // 3. 构造 Op
+//   auto d2vOp = builder_.create<ONNXDataToVectorOp>(
+//       ImportLoc(node),
+//       outputType,
+//       inputs[0],
+//       builder_.getI32IntegerAttr(bit_width));
+
+//   // 4. 绑定输出
+//   if (node.output_size() >= 1 && !node.output(0).empty()) {
+//     // 假设 TD 定义的 result 名为 output_vector，生成函数为 getOutputVector()
+//     // 如果不确定，统一用 getResult(0)
+//     frontend_symbols_.AddMapping(node.output(0), d2vOp.getResult());
+//   }
+// }
+
+void ImportNodeDataToVector(const onnx::NodeProto &node) {
+  std::vector<Value> inputs;
+  getNodeInputs(node, inputs);
+  assert(inputs.size() == 1 && "DataToVector node expects exactly 1 input");
+
+  // 1. bit_width
+  int32_t bit_width = 32;
+  for (int i = 0; i < node.attribute_size(); ++i) {
+    const auto &attr = node.attribute(i);
+    if (attr.name() == "bit_width_i")
+      bit_width = static_cast<int32_t>(attr.i());
+  }
+  assert(bit_width == 32 && "Only bit_width=32 is supported");
+
+  // 2. 输入 (B, N) -> 输出固定 (B, 32)
+  auto inputType = mlir::cast<RankedTensorType>(inputs[0].getType());
+  auto shape = inputType.getShape().vec(); // (B, N)
+  assert(shape.size() == 2 && "DataToVector expects rank-2 input (B, N)");
+
+  shape.back() = 32; // 固定对齐到 SVR=32 words
+
+  Type outputType = RankedTensorType::get(shape, inputType.getElementType());
+
+  // 3. create op
+  auto d2vOp = builder_.create<ONNXDataToVectorOp>(
+      ImportLoc(node),
+      outputType,
+      inputs[0],
+      builder_.getI32IntegerAttr(bit_width));
+
+  if (node.output_size() >= 1 && !node.output(0).empty())
+    frontend_symbols_.AddMapping(node.output(0), d2vOp.getResult());
+}
+
+
+
+
+
+void ImportNodeSNNFC(const onnx::NodeProto &node) {
+  std::vector<Value> inputs;
+  getNodeInputs(node, inputs);
+
+  llvm::errs() << "[ImportNodeSNNFC] called, inputs=" << inputs.size() << "\n";
+
+  assert(inputs.size() >= 4 &&
+         "SNNFC node expects input_vector, inputweight, lsmweight, and shape_anchor");
+
+  // weights 一致性检查（可保留）
+  auto inputWeightType = mlir::cast<RankedTensorType>(inputs[1].getType());
+  auto lsmWeightType   = mlir::cast<RankedTensorType>(inputs[2].getType());
+  int64_t neuronNum  = inputWeightType.getShape().back();
+  int64_t neuronNum2 = lsmWeightType.getShape().back();
+  assert(neuronNum == neuronNum2);
+
+  // 关键：输出 type 直接取 anchor，保证静态
+  auto anchorType = mlir::dyn_cast<RankedTensorType>(inputs[3].getType());
+  assert(anchorType && "shape_anchor must be a RankedTensorType");
+
+  // 可选检查：anchor second dim == neuronNum
+  auto aShape = anchorType.getShape();
+  assert(aShape.size() == 2 && "shape_anchor must be rank-2");
+  assert(aShape[1] == neuronNum && "shape_anchor dim1 must equal NeuronNum");
+
+  Type outputType  = inputs[3].getType();
+
+  // Type outputType = anchorType;
+
+  auto snnfcOp = builder_.create<ONNXSNNFCOp>(
+      ImportLoc(node),
+      outputType,
+      inputs[0], // input_vector
+      inputs[1], // inputweight
+      inputs[2], // lsmweight
+      inputs[3]  // shape_anchor
+  );
+
+  if (node.output_size() >= 1 && !node.output(0).empty())
+    frontend_symbols_.AddMapping(node.output(0), snnfcOp.getResult());
+}
+
 }; // class FrontendGenImpl
 
 } // namespace detail

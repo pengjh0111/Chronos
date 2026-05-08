@@ -764,6 +764,69 @@ private:
           LLVM_DEBUG(llvm::dbgs() << "Found mgpuCudnnMaxPoolForward with " 
                     << info.targetMemrefs.size() << " target memrefs\n");
         }
+      } else if (callee == "mgpuOneDnnMatMul") {
+        // MatMul: 参数索引 6 是输入，参数索引 7 是权重(不处理)，参数索引 8 是输出
+        WrapperFuncInfo info(callOp, false);
+        
+        auto operands = callOp.getOperands();
+        if (operands.size() > 8) {
+          Value inPtr = operands[6];   // 输入
+          // Value weightPtr = operands[7]; // 权重，不处理
+          Value outPtr = operands[8];  // 输出
+          
+          if (auto inMemref = traceBackToMemref(inPtr)) {
+            info.targetMemrefs.push_back(inMemref);
+          }
+          if (auto outMemref = traceBackToMemref(outPtr)) {
+            info.targetMemrefs.push_back(outMemref);
+          }
+          
+          wrappers.push_back(info);
+          LLVM_DEBUG(llvm::dbgs() << "Found mgpuOneDnnMatMul with " 
+                    << info.targetMemrefs.size() << " target memrefs\n");
+        }
+      } else if (callee == "mgpuOneDnnMaxPool2d") {
+        // MaxPool2d: 参数索引 12 是输入，参数索引 13 是输出
+        WrapperFuncInfo info(callOp, false);
+        
+        auto operands = callOp.getOperands();
+        if (operands.size() > 13) {
+          Value inPtr = operands[12];  // 输入
+          Value outPtr = operands[13]; // 输出
+          
+          if (auto inMemref = traceBackToMemref(inPtr)) {
+            info.targetMemrefs.push_back(inMemref);
+          }
+          if (auto outMemref = traceBackToMemref(outPtr)) {
+            info.targetMemrefs.push_back(outMemref);
+          }
+          
+          wrappers.push_back(info);
+          LLVM_DEBUG(llvm::dbgs() << "Found mgpuOneDnnMaxPool2d with " 
+                    << info.targetMemrefs.size() << " target memrefs\n");
+        }
+      } else if (callee == "mgpuOneDnnConv2dForward") {
+        // Conv2dForward: 参数索引 13 是输入，参数索引 14 是权重(不处理)，参数索引 16 是输出
+        WrapperFuncInfo info(callOp, false);
+        
+        auto operands = callOp.getOperands();
+        if (operands.size() > 16) {
+          Value inPtr = operands[13];  // 输入
+          // Value weightPtr = operands[14]; // 权重，不处理
+          // Value biasPtr = operands[15];   // bias，不处理
+          Value outPtr = operands[16]; // 输出
+          
+          if (auto inMemref = traceBackToMemref(inPtr)) {
+            info.targetMemrefs.push_back(inMemref);
+          }
+          if (auto outMemref = traceBackToMemref(outPtr)) {
+            info.targetMemrefs.push_back(outMemref);
+          }
+          
+          wrappers.push_back(info);
+          LLVM_DEBUG(llvm::dbgs() << "Found mgpuOneDnnConv2dForward with " 
+                    << info.targetMemrefs.size() << " target memrefs\n");
+        }
       }
     });
     

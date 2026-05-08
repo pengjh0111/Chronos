@@ -37,6 +37,8 @@ add_onnx_mlir_library(OMMlirDialects
   MergeGpuModulesPass.cpp
   ConvertONNXToOneDNN.cpp
   ConvertGpuMemcpyToMemrefCopyPass.cpp
+  LowerKrnlGlobal.cpp
+  ConvertONNXSNNToKrnl.cpp
 
   DEPENDS
   OMKrnlIncGen
@@ -51,4 +53,5 @@ add_onnx_mlir_library(OMMlirDialects
   MLIRVectorDialect
   MLIRLLVMIRTransforms
   MLIRShapeDialect
+  MLIREmitCDialect
   )

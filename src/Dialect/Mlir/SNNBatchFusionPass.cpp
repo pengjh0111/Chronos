@@ -163,12 +163,12 @@ struct SNNBatchFusionPass
       return;
     }
     
-    // 7. 在重排完成后，执行batch fusion（现在会按相同的batch size进行）
-    LLVM_DEBUG(llvm::dbgs() << "\n=== Starting Batch Fusion (Batch Size: " << batchSize << ") ===\n");
-    if (!performBatchFusion(funcOp)) {
-      LLVM_DEBUG(llvm::dbgs() << "Failed to perform batch fusion\n");
-      return;
-    } 
+    // // 7. 在重排完成后，执行batch fusion（现在会按相同的batch size进行）
+    // LLVM_DEBUG(llvm::dbgs() << "\n=== Starting Batch Fusion (Batch Size: " << batchSize << ") ===\n");
+    // if (!performBatchFusion(funcOp)) {
+    //   LLVM_DEBUG(llvm::dbgs() << "Failed to perform batch fusion\n");
+    //   return;
+    // } 
     
     LLVM_DEBUG(llvm::dbgs() << "Completed SNNBatchFusionPass\n");
   }
@@ -897,7 +897,7 @@ private:
     
     // 检查操作是否基本相邻（允许中间有少量非融合操作）
     Operation* prevOp = sortedOps[0];
-    int maxGap = 5; // 允许的最大间隔操作数
+    int maxGap = 1; // 允许的最大间隔操作数
     
     for (size_t i = 1; i < sortedOps.size(); ++i) {
       Operation* currentOp = sortedOps[i];
@@ -1059,8 +1059,8 @@ private:
         bool hack = fuseConvOperations(builder, group);
       return true;
     } else if (group.opType == "MaxPool" || group.opType == "MaxPoolSingleOut") {
-      // return fuseMaxPoolOperations(builder, group);
-      return true;
+      return fuseMaxPoolOperations(builder, group);
+      // return true;
     } else if (group.opType == "MatMul") {
       // 这里处理纯MatMul或者Gemm(bias=0)的融合
       return fuseMatMulOperations(builder, group);
@@ -1069,8 +1069,8 @@ private:
       // 这里处理有非零bias的Gemm融合
       return fuseGemmOperations(builder, group);
     } else if (group.opType == "ReduceMean") {
-      return fuseReduceMeanOperations(builder, group);
-      // return true;
+      // return fuseReduceMeanOperations(builder, group);
+      return true;
     } else if (group.opType == "Transpose") {  // 新增
       // return fuseTransposeOperations(builder, group);
       return true;
@@ -4892,8 +4892,8 @@ static mlir::PassRegistration<SNNBatchFusionPass> pass;
 //     LLVM_DEBUG(llvm::dbgs() << "Running SNNBatchFusionPass with batch size: " 
 //                << batchSize << "\n");
     
-//     // 1. 预处理：给时序性算子添加layer字段
-//     preprocessTemporalOpsWithLayerInfo(funcOp);
+//     // // 1. 预处理：给时序性算子添加layer字段
+//     // preprocessTemporalOpsWithLayerInfo(funcOp);
     
 //     // 2. 直接执行基于layer信息的重排
 //     SmallVector<OperationInfo> operationInfos;
@@ -5987,6 +5987,7 @@ static mlir::PassRegistration<SNNBatchFusionPass> pass;
 //     } else if (group.opType == "MatMul") {
 //       // 这里处理纯MatMul或者Gemm(bias=0)的融合
 //       return fuseMixedMatMulOperations(builder, group);
+//       // return true;
 //     } else if (group.opType == "Gemm") {
 //       // 这里处理有非零bias的Gemm融合
 //       return fuseGemmOperations(builder, group);

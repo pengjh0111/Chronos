@@ -398,30 +398,34 @@ void FrontendToKrnlLoweringPass::runOnOperation() {
     // other ONNX operations. The following operations are prevented from
     // being lowered further. See the comment in the declaration of
     // 'emitIntermediateIR' for more details.
-    target.addLegalOp<ONNXMatMulOp>(); // modified by p
+    // target.addLegalOp<ONNXMatMulOp>(); // modified by p
     // target.addLegalOp<ONNXReshapeOp>(); // MobileNet needs this
     // target.addLegalOp<ONNXSplitV11Op>();
     // target.addLegalOp<ONNXSqueezeV11Op>();
-    target.addLegalOp<ONNXTransposeOp>(); // BERT needs this
+    // target.addLegalOp<ONNXTransposeOp>(); // BERT needs this
 
-    target.addLegalOp<ONNXSoftmaxOp>(); // modified by p
-    target.addLegalOp<ONNXSliceOp>(); // modified by p
+    // target.addLegalOp<ONNXSoftmaxOp>(); // modified by p
+    // target.addLegalOp<ONNXSliceOp>(); // modified by p
     target.addLegalOp<ONNXConvOp>(); // modified by p
     // target.addLegalOp<ONNXAddOp>(); // modified by p
     // target.addLegalOp<ONNXSubOp>(); // modified by p
     // target.addLegalOp<ONNXMulOp>(); // modified by p 
     // target.addLegalOp<ONNXNegOp>(); // modified by p
     // target.addLegalOp<ONNXDivOp>(); // modified by p
-    target.addLegalOp<ONNXGemmOp>(); // modified by p
+    // target.addLegalOp<ONNXGemmOp>(); // modified by p
     // target.addLegalOp<ONNXFlattenOp>(); // modified by p (SqueezeNet needed)
-    target.addLegalOp<ONNXMaxPoolSingleOutOp>(); // modified by p
+    // target.addLegalOp<ONNXMaxPoolSingleOutOp>(); // modified by p
     target.addLegalOp<ONNXAveragePoolOp>(); // modified by p
-    target.addLegalOp<ONNXGatherOp>(); // modified by p (BERT needs this)
-    target.addLegalOp<ONNXReduceMeanV13Op>(); // modified by p (BERT fusion needs this)
+    // target.addLegalOp<ONNXGatherOp>(); // modified by p (BERT needs this)
+    // target.addLegalOp<ONNXReduceMeanV13Op>(); // modified by p (BERT fusion needs this)
     target.addLegalOp<ONNXReduceSumV11Op>(); // modified by p (BERT fusion needs this)
-    target.addLegalOp<ONNXMHAOp>(); // modified by p (BERT fusion needs this)
-    target.addLegalOp<ONNXConcatOp>(); // modified by p (BERT fusion needs this)
-    target.addLegalOp<ONNXSplitOp>(); // modified by p (BERT fusion needs this)
+    // target.addLegalOp<ONNXMHAOp>(); // modified by p (BERT fusion needs this)
+    // target.addLegalOp<ONNXConcatOp>(); // modified by p (BERT fusion needs this)
+    // target.addLegalOp<ONNXSplitOp>(); // modified by p (BERT fusion needs this)
+    target.addLegalOp<ONNXLIFOp>();
+    target.addLegalOp<ONNXCustomOp>();
+    target.addLegalOp<ONNXDataToVectorOp>();
+    target.addLegalOp<ONNXSNNFCOp>();
   }
 
   // 定义检查函数：判断是否为 normalization/MHA 相关操作

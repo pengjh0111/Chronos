@@ -37,6 +37,14 @@ void registerOMPasses(int optLevel) {
   // function to make themselves available as a command-line option.
 
   mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> { //modified by p
+    return createConvertONNXSNNToKrnlPass();
+  });
+
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> { //modified by p
+    return createLowerKrnlGlobalPass();
+  });
+
+  mlir::registerPass([]() -> std::unique_ptr<mlir::Pass> { //modified by p
     return createConvertGpuMemcpyToMemrefCopyPass();
   });
 
