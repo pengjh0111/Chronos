@@ -1,166 +1,69 @@
-<!--- SPDX-License-Identifier: Apache-2.0 -->
-<p align="center"><img width="50%" src="docs/logo/onnx-mlir-1280x640.png" /></p>
+# Chronos
 
-# ONNX-MLIR
+**A lightweight temporal-tile scheduler for spatiotemporal neural networks (STNNs).**
 
-This project (https://onnx.ai/onnx-mlir/) provides compiler technology to transform a valid Open Neural Network Exchange (ONNX) graph into code that implements the graph with minimum runtime support.
-It implements the [ONNX standard](https://github.com/onnx/onnx#readme) and is based on the underlying [LLVM/MLIR](https://mlir.llvm.org) compiler technology.
+STNNs — spiking neural networks, ConvLSTM/ConvGRU models, and other stateful architectures — interleave two kinds of operators: *spatial* operators (conv, linear) that are independent across time steps and dominate compute, and *temporal* operators (membrane updates, gates) that carry state and serialize execution. Existing schedulers and compilers fuse only within a single time step, leaving cross-time parallelism and cross-time batching untouched — or pay hours of autotuning to recover it.
 
-| System        | Build Status | Model Zoo Status |
-|---------------|--------------|------------------|
-| s390x-Linux   | [![Build Status](https://www.onnxmlir.xyz/jenkins/buildStatus/icon?job=ONNX-MLIR-Pipeline-Docker-Build&build=last:%24%7Bparams.GITHUB_PR_NUMBER_PUSH=main%7D&subject=Jenkins%20CI)](https://www.onnxmlir.xyz/jenkins/job/ONNX-MLIR-Pipeline-Docker-Build/) | [![Model Zoo Status](https://www.onnxmlir.xyz/jenkins/buildStatus/icon?job=ONNX-MLIR-Pipeline-Docker-Build&build=last:%24%7Bparams.GITHUB_PR_NUMBER_PUSH=main%7D&config=modelzoo)](https://www.onnxmlir.xyz/jenkins/job/ONNX-MLIR-Pipeline-Docker-Build/Model_20Zoo_20Report/) |
-| ppc64le-Linux | [![Build Status](https://www.onnxmlir.xyz/jenkinp/buildStatus/icon?job=ONNX-MLIR-Pipeline-Docker-Build&build=last:%24%7Bparams.GITHUB_PR_NUMBER_PUSH=main%7D&subject=Jenkins%20CI)](https://www.onnxmlir.xyz/jenkinp/job/ONNX-MLIR-Pipeline-Docker-Build/) | [![Model Zoo Status](https://www.onnxmlir.xyz/jenkinp/buildStatus/icon?job=ONNX-MLIR-Pipeline-Docker-Build&build=last:%24%7Bparams.GITHUB_PR_NUMBER_PUSH=main%7D&config=modelzoo)](https://www.onnxmlir.xyz/jenkinp/job/ONNX-MLIR-Pipeline-Docker-Build/Model_20Zoo_20Report/) |
-| amd64-Linux   | [![Build Status](https://www.onnxmlir.xyz/jenkinx/buildStatus/icon?job=ONNX-MLIR-Pipeline-Docker-Build&build=last:%24%7Bparams.GITHUB_PR_NUMBER_PUSH=main%7D&subject=Jenkins%20CI)](https://www.onnxmlir.xyz/jenkinx/job/ONNX-MLIR-Pipeline-Docker-Build/) | [![Model Zoo Status](https://www.onnxmlir.xyz/jenkinx/buildStatus/icon?job=ONNX-MLIR-Pipeline-Docker-Build&build=last:%24%7Bparams.GITHUB_PR_NUMBER_PUSH=main%7D&config=modelzoo)](https://www.onnxmlir.xyz/jenkinx/job/ONNX-MLIR-Pipeline-Docker-Build/Model_20Zoo_20Report/) |
-| amd64-Windows | [![Build Status](https://dev.azure.com/onnx-pipelines/onnx/_apis/build/status/MLIR-Windows-CI?branchName=main)](https://dev.azure.com/onnx-pipelines/onnx/_build/latest?definitionId=9&branchName=main) | |
-| amd64-macOS   | [![Build Status](https://github.com/onnx/onnx-mlir/actions/workflows/macos-amd64-build.yml/badge.svg)](https://github.com/onnx/onnx-mlir/actions/workflows/macos-amd64-build.yml) |
-| | [![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/5549/badge)](https://bestpractices.coreinfrastructure.org/projects/5549) |
+Chronos closes this gap with a scheduling abstraction, not a kernel library: it reorganizes the *execution* of an STNN graph while keeping every spatial operator on its fastest existing implementation.
 
-This project contributes:
-* an ONNX Dialect that can be integrated in other projects,
-* a compiler interfaces that lower ONNX graphs into MLIR files/LLVM bytecodes/C & Java libraries,
-* an `onnx-mlir` driver to perform these lowering,
-* and a python/C/C++/Java runtime environment.
+## Highlights
 
-Current levels of support for the code generation of ONNX operations are listed here for
-[a generic CPU](docs/SupportedONNXOps-cpu.md) and
-[IBM's Telum integrated AI accelerator](docs/SupportedONNXOps-NNPA.md).
+- **Mean speedups on A100** of roughly 2.0× over SpikingJelly and TorchScript, 2.0× over BladeDISC, and 1.25× over TensorRT across 11 STNN workloads; **1.58× over Welder on V100**; **1.42× average on CPU** over TorchScript/SpikingJelly.
+- **Scheduling overhead of seconds**, versus hours (TVM) to thousands of seconds (search-based compilers) — no per-model kernel autotuning.
+- Portable by construction: multi-stream execution on NVIDIA GPUs, fusion-and-codegen backend on CPUs; the temporal restructuring alone yields gains even without multi-stream hardware.
 
-## Interacting with the community.
+## The tTile abstraction
 
-For ongoing discussions, we use an [`#onnx-mlir-discussion`](https://lfaifoundation.slack.com/archives/C01J4NAL4A2) slack channel established under the Linux Foundation AI and Data Workspace.
-Join this workspace using this [link](https://join.slack.com/t/lfaifoundation/shared_invite/zt-o65errpw-gMTbwNr7FnNbVXNVFkmyNA).
+A **tTile** is a schedulable execution block capturing a bounded region of dataflow *and stateflow*: (1) spatial operator instances drawn from consecutive time steps that share no temporal dependence, and (2) the temporal operator instances whose dependences fit entirely inside the same window. It is loop tiling applied jointly to the spatial and temporal dimensions of the operator stack — tTiles along the anti-diagonal are dependence-free and run concurrently.
 
-We use GitHub Issues for request for comments, questions, or bug reports.
-Security-related issues are reported using the channels listed in the [SECURITY](SECURITY.md) page.
+Three design decisions follow:
 
-We hold informal weekly meetings on Tuesdays where we discuss  current issues and progress. Meeting agenda, notes, and links (to participate) are found [here](https://github.com/onnx/onnx-mlir/wiki/Informal-meeting-agenda-and-notes). Please email alexe@us.ibm.com to request a 15-30 min time slot to discuss a specific topic of interest.
+1. **Adaptive spatial batching across time.** Spatial instances at different t are independent given their inputs, so Chronos batches them into single vendor-library calls — with a *configurable* batch size selected by a cost model, not fixed at 1 or T.
+2. **Batching-guided temporal fusion.** Temporal operators remain strictly sequential in t; Chronos fuses them only where the chosen spatial batch makes it valid, never mutating state prematurely.
+3. **Deliberately conservative spatial fusion.** Chronos avoids fusing spatial operators where fusion would demand expensive autotuning or forfeit vendor-library kernels; it fuses only always-profitable patterns (e.g., elementwise chains). This is what keeps scheduling cost at seconds.
 
-## Setting up ONNX-MLIR using Prebuilt Containers
+## Scheduling and runtime
 
-The preferred approach to using and developing ONNX-MLIR is to use Docker Images and Containers, as getting the proper code dependences may be tricky on some systems. Our instructions on using ONNX-MLIR with Dockers are [here](docs/Docker.md).
+- **Dual-level holistic placement** assigns every operator a 4D coordinate (tTile-level and intra-tTile 2D positions), computed by two topological traversals — the static interface between graph analysis and the runtime.
+- **Track-based SPSP execution**: a hierarchical track abstraction (trackgroups → tracks) dynamically binds coordinates to execution slots, alternating sequential and parallel phases. On GPUs, tracks map to CUDA streams; tTile-internal paths overlap with batched vendor kernels across streams.
+- **Cost-model-driven size selection** picks the temporal batch size per region; the model's coefficients are robust — top-1-or-2 configuration hit rate stays at 100% under ±20% coefficient perturbation across hardware/time-step settings.
 
-If you intend to develop code, you should look at our [workflow](docs/Workflow.md) document which help you setup your Docker environment in a way that let you contribute code easily.
+## Evaluated workloads
 
-## Setting up ONNX-MLIR directly
+11 STNNs spanning three families: spiking CNNs (ResNet18/34, AlexNet, ZFNet, VGG11, MobileNet-V1/V2), conv-recurrent networks (ConvLSTM, ConvGRU), and spiking transformers (Spikformer-style, SpikeBERT-style), on A100, V100, and Xeon CPU.
 
-ONNX-MLIR runs natively on Linux, OSX, and Windows.
-Detailed instructions are provided below.
+## Getting started
 
-### Prerequisites
+```bash
+git clone https://github.com/pengjh0111/Chronos
+cd Chronos
+# TODO: pip install -r requirements.txt  (PyTorch version, SpikingJelly for baselines)
 
-<!-- Keep list below in sync with docs/Prerequisite.md. -->
-```
-python >= 3.8
-gcc >= 6.4
-protobuf >= 4.21.12
-cmake >= 3.13.4
-make >= 4.2.1 or ninja >= 1.10.2
-java >= 1.11 (optional)
+# TODO: single-model entry point, e.g.
+# python run.py --model resnet18_snn --timesteps 16 --device cuda
 ```
 
-All the `PyPi` package dependencies and their appropriate versions are captured in [requirements.txt](requirements.txt).
+<!-- TODO: fill in actual entry points, dataset/checkpoint preparation, and baseline installation
+     (SpikingJelly / TorchScript / BladeDISC / TensorRT / Welder) for reproducing the paper tables. -->
 
-Look [here](docs/Prerequisite.md) for help to set up the prerequisite software.
-
-At any point in time, ONNX-MLIR depends on a specific commit of the LLVM project that has been shown to work with the project.
-Periodically the maintainers need to move to a more recent LLVM level.
-Among other things, this requires to update the LLVM commit string in [clone-mlir.sh](utils/clone-mlir.sh).
-When updating ONNX-MLIR, it is good practice to check that the commit string of the MLIR/LLVM is the same as the one listed in that file. See instructions [here](docs/BuildONNX.md) when third-party ONNX also need to be updated.
-
-### Build
-
-Directions to install MLIR and ONNX-MLIR are dependent on your OS.
-* [Linux or OSX](docs/BuildOnLinuxOSX.md).
-* [Windows](docs/BuildOnWindows.md).
-
-After installation, an `onnx-mlir` executable should appear in the `build/Debug/bin` or `build/Release/bin` directory.
-
-If you have difficulties building, rebuilding, or testing `onnx-mlir`, check this [page](docs/TestingHighLevel.md) for helpful hints.
-
-
-## Using ONNX-MLIR
-
-The usage of `onnx-mlir` is as such:
+## Repository structure
 
 ```
-OVERVIEW: ONNX-MLIR modular optimizer driver
-
-USAGE: onnx-mlir [options] <input file>
-
-OPTIONS:
-
-Generic Options:
-
-  --help        - Display available options (--help-hidden for more)
-  --help-list   - Display list of available options (--help-list-hidden for more)
-  --version     - Display the version of this program
-
-ONNX-MLIR Options:
-These are frontend options.
-
-  Choose target to emit:
-      --EmitONNXBasic - Ingest ONNX and emit the basic ONNX operations without inferred shapes.
-      --EmitONNXIR    - Ingest ONNX and emit corresponding ONNX dialect.
-      --EmitMLIR      - Lower the input to MLIR built-in transformation dialect.
-      --EmitLLVMIR    - Lower the input to LLVM IR (LLVM MLIR dialect).
-      --EmitObj       - Compile the input to an object file.
-      --EmitLib       - Compile and link the input into a shared library (default).
-      --EmitJNI       - Compile the input to a jar file.
-
-  Optimization levels:
-      --O0           - Optimization level 0 (default).
-      --O1           - Optimization level 1.
-      --O2           - Optimization level 2.
-      --O3           - Optimization level 3.
+# TODO: adjust to the actual tree
+scheduler/    tTile construction, dual-level placement, cost model
+runtime/      track-based SPSP execution (CUDA streams backend, CPU codegen backend)
+models/       STNN workload definitions
+benchmarks/   end-to-end evaluation scripts and baseline harnesses
 ```
 
-The full list of options is given by the `-help` option.
-The `-` and the `--` prefix for flags can be used interchangeably.
-Note that just as most compilers, the default optimization level is `-O0`.
-We recommend using `-O3` for most applications.
+## Relationship to triton-snn-fusion
 
-Options are also read from the `ONNX_MLIR_FLAGS` environment variable. For example, `ONNX_MLIR_FLAGS="-O3"` will ensure `-O3` for all compilations.
+Chronos treats every operator as an opaque kernel and optimizes *when and where* it runs. Its successor, [triton-snn-fusion](https://github.com/pengjh0111/triton-snn-fusion), opens the kernel: it compiles a bounded spatio-temporal region into a single fused Triton kernel in which weights stay resident on-chip across a temporal window and the state recurrence runs as an in-register epilogue — removing the memory traffic that no cross-kernel scheduler can reach. The two are complementary layers of the same stack.
 
-### Simple Example
+## Citation
 
-For example, use the following command to lower an ONNX model (e.g., add.onnx) to ONNX dialect:
-```shell
-./onnx-mlir --EmitONNXIR add.onnx
-```
-The output should look like:
-```mlir
-module {
-  func.func @main_graph(%arg0: tensor<10x10x10xf32>, %arg1: tensor<10x10x10xf32>) -> tensor<10x10x10xf32> {
-    %0 = "onnx.Add"(%arg0, %arg1) : (tensor<10x10x10xf32>, tensor<10x10x10xf32>) -> tensor<10x10x10xf32>
-    return %0 : tensor<10x10x10xf32>
-  }
-}
-```
+The Chronos paper is currently under submission. <!-- TODO: add BibTeX after publication -->
 
-An example based on the add operation is found [here](docs/doc_example), which build an ONNX model using a python script, and then provide a main program to load the model's value, compute, and print the models output.
+## License
 
-### Writing a driver to perform inferences: end to end example
-
-An end to end example is provided [here](docs/mnist_example/README.md), which train, compile, and execute a simple MNIST example using our
-C/C++, Python, or Java interface.
-
-## Documentation
-
-Documentation is provided in the `docs` sub-directory; the [DocumentList](docs/DocumentList.md) page provides an organized list of documents. Information is also provided on our public facing
-[onnx.ai/onnx-mlir](https://onnx.ai/onnx-mlir/) pages.
-
-## Contributing
-
-We are welcoming contributions from the community.
-Please consult the [CONTRIBUTING](CONTRIBUTING.md) page for help on how to proceed.
-
-ONNX-MLIR requires committers to sign their code using the [Developer Certificate of Origin (DCO)](https://developercertificate.org).
-Practically, each `git commit` needs to be signed, see [here](docs/Workflow.md#step-7-commit--push) for specific instructions.
-
-## Code of Conduct
-
-The ONNX-MLIR code of conduct is described at https://onnx.ai/codeofconduct.html.
-
-## Projects related/using onnx-mlir
-
-* The [onnx-mlir-serving](https://github.com/IBM/onnx-mlir-serving) project implements a GRPC server written with C++ to serve onnx-mlir compiled models. Benefiting from C++ implementation, ONNX Serving has very low latency overhead and high throughput.
+<!-- TODO: choose and add a license file -->
